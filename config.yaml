@@ -1,0 +1,19 @@
+# ALBart Configuration
+# Spotify credentials must be set as environment variables:
+#   SPOTIPY_CLIENT_ID
+#   SPOTIPY_CLIENT_SECRET
+#   SPOTIPY_REDIRECT_URI  (default: http://localhost:8888/callback)
+
+pipeline:
+  art_source_size: 300      # pixel width of source art to request from Spotify
+
+runtime:
+  embedding_interval_seconds: 10
+  buffer_length_seconds: 10
+  top_n_neighbors: 10
+  cycle_length_seconds: 60
+  softmax_k: 5.0
+  crossfade_seconds: 0.75
+  display_fps: 30
+  display_mode: "sim"       # "sim" or "hub75"
+  sim_scale: 16             # pixels per LED in sim mode

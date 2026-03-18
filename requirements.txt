@@ -1,0 +1,11 @@
+spotipy
+requests
+Pillow
+torch
+transformers
+faiss-cpu
+sounddevice
+numpy
+pygame
+pyyaml
+tqdm

@@ -1,0 +1,27 @@
+# Data files (large/generated)
+data/db.sqlite
+data/faiss.index
+data/faiss_ids.npy
+data/previews/
+data/art_original/
+data/art_32/
+
+# Spotify OAuth cache
+.cache
+.cache-*
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# macOS
+.DS_Store
+
+# Secrets / env
+.env
