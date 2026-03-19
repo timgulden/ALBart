@@ -53,16 +53,16 @@ def run(force: bool = False) -> None:
         if t["preview_url"] is None and (force or t["embedding_status"] != "ok")
     ]
     if needs_preview:
-        print(f"Looking up preview URLs for {len(needs_preview)} tracks (iTunes → Deezer)...")
+        print(f"Looking up preview URLs for {len(needs_preview)} tracks (Deezer → iTunes)...")
         itunes_found = deezer_found = 0
         for row in tqdm(needs_preview, desc="Preview lookup"):
-            url = itunes.lookup_preview_url(row["title"], row["artist"])
+            url = deezer.lookup_preview_url(row["title"], row["artist"])
             if url:
-                itunes_found += 1
+                deezer_found += 1
             else:
-                url = deezer.lookup_preview_url(row["title"], row["artist"])
+                url = itunes.lookup_preview_url(row["title"], row["artist"])
                 if url:
-                    deezer_found += 1
+                    itunes_found += 1
 
             if url:
                 with conn:
@@ -74,7 +74,7 @@ def run(force: bool = False) -> None:
                 with conn:
                     database.update_embedding_status(conn, row["track_id"], "no_preview")
         print(f"Found previews for {itunes_found + deezer_found} tracks "
-              f"(iTunes: {itunes_found}, Deezer: {deezer_found}).")
+              f"(Deezer: {deezer_found}, iTunes fallback: {itunes_found}).")
 
     # --- Download and preprocess ---
     to_process = [
