@@ -47,6 +47,14 @@ Never hardcode device strings elsewhere. Never make this a config option.
 ### FAISS Index + ID Map
 `data/faiss.index` and `data/faiss_ids.npy` are always written and read as a pair. A single helper function in `pipeline/embedder.py` owns both write operations, and a single helper in `runtime/lookup.py` owns both read operations.
 
+### Alias Sampling, Dwell, and Brightness (locked in)
+- **Sampling**: Vose's Alias Method over the full track set (all tracks, not top-N). Weights = normalized softmax over all distances. O(1) per draw.
+- **Dwell time**: Absolute, not relative to the best match. `dwell = clamp(exp(-dwell_k * d_i) * max_dwell, min_dwell, max_dwell)`. Strong match → 10s; background noise → everything floors at 1s.
+- **Brightness**: Nearest-neighbor distance only. `brightness = clamp(exp(-brightness_k * d_min), 0, 1)`. Fades to new target over `brightness_fade_seconds` when a new embedding arrives.
+- **With-replacement**: same cover may follow itself — natural extended display for strong matches.
+- `softmax_k`, `dwell_k`, `brightness_k` are independent — tune separately.
+- `embedding_interval_seconds: 0` means continuous (recompute immediately after finishing).
+
 ### Config
 All tunable values are in `config.yaml` and accessed through a loaded config dict passed at startup. No module-level constants for values the spec calls "configurable" or "default". Use `pyyaml` to load.
 

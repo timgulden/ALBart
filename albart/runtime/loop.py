@@ -1,4 +1,6 @@
-"""Main runtime display loop."""
+"""Main runtime display loop with alias sampling, brightness fading."""
+
+from __future__ import annotations
 
 import logging
 import queue
@@ -8,7 +10,7 @@ import numpy as np
 
 from albart.pipeline.preprocess import load_art_32
 from albart.runtime.display import DisplayBackend
-from albart.runtime.lookup import TrackLookup
+from albart.runtime.lookup import AliasTable, TrackLookup
 
 logger = logging.getLogger(__name__)
 
@@ -18,11 +20,29 @@ def crossfade(frame_a: np.ndarray, frame_b: np.ndarray, alpha: float) -> np.ndar
     return (frame_a * (1.0 - alpha) + frame_b * alpha).astype(np.uint8)
 
 
+def apply_brightness(frame: np.ndarray, brightness: float) -> np.ndarray:
+    """Scale RGB values by brightness [0, 1]."""
+    return (frame * brightness).astype(np.uint8)
+
+
 class DisplayLoop:
     """
-    Drives the display on the main thread at a fixed FPS.
-    Reads new embeddings from result_queue, looks up playlists,
-    and crossfades between album art covers.
+    Main display loop — runs on the main thread at display_fps.
+
+    Sampling:
+      - Alias table built from full FAISS query (all tracks, weighted by distance)
+      - Each cover is sampled with replacement; same cover may follow itself
+      - Dwell time per sample is absolute (exp(-dwell_k * d) * max_dwell, clamped)
+
+    Brightness:
+      - Driven by nearest-neighbor distance from latest embedding
+      - Fades smoothly to new target over brightness_fade_seconds
+      - Applied to every rendered frame (including during crossfades)
+
+    Alias table updates:
+      - New table computed as soon as a new embedding arrives
+      - Held as _pending_table, swapped in at next cover boundary
+      - Never interrupts an in-progress crossfade
     """
 
     def __init__(
@@ -38,18 +58,34 @@ class DisplayLoop:
 
         rt = config["runtime"]
         self.fps = rt["display_fps"]
-        self.top_n = rt["top_n_neighbors"]
         self.softmax_k = rt["softmax_k"]
-        self.cycle_length = rt["cycle_length_seconds"]
+        self.dwell_k = rt["dwell_k"]
+        self.brightness_k = rt["brightness_k"]
+        self.min_dwell = rt["min_dwell_seconds"]
+        self.max_dwell = rt["max_dwell_seconds"]
         self.crossfade_seconds = rt["crossfade_seconds"]
+        self.brightness_fade_seconds = rt["brightness_fade_seconds"]
 
-        self._playlist: list[dict] = []
-        self._playlist_index = 0
+        # Display state
         self._current_frame: np.ndarray | None = None
         self._next_frame: np.ndarray | None = None
         self._dwell_remaining: float = 0.0
         self._in_crossfade: bool = False
         self._crossfade_elapsed: float = 0.0
+
+        # Brightness state
+        self._brightness: float = 0.0       # current rendered brightness
+        self._brightness_target: float = 0.0
+        self._brightness_fade_remaining: float = 0.0
+
+        # Alias tables
+        self._table: AliasTable | None = None
+        self._pending_table: AliasTable | None = None
+
+        # Art cache: track_id → (32,32,3) uint8 array
+        self._art_cache: dict[str, np.ndarray] = {}
+
+    # ── Public ────────────────────────────────────────────────────────────
 
     def run(self) -> None:
         frame_duration = 1.0 / self.fps
@@ -57,17 +93,16 @@ class DisplayLoop:
 
         while True:
             t0 = time.monotonic()
-
-            self._check_for_new_embedding()
+            self._check_embedding_queue()
             self._tick(frame_duration)
-
-            elapsed = time.monotonic() - t0
-            sleep = frame_duration - elapsed
+            sleep = frame_duration - (time.monotonic() - t0)
             if sleep > 0:
                 time.sleep(sleep)
 
-    def _check_for_new_embedding(self) -> None:
-        """Drain the embedding queue, keeping only the latest result."""
+    # ── Embedding / table updates ─────────────────────────────────────────
+
+    def _check_embedding_queue(self) -> None:
+        """Drain queue, build alias table from latest embedding."""
         latest = None
         try:
             while True:
@@ -75,78 +110,118 @@ class DisplayLoop:
         except queue.Empty:
             pass
 
-        if latest is not None and not self._in_crossfade:
-            self._update_playlist(latest)
-
-    def _update_playlist(self, embedding: np.ndarray) -> None:
-        results = self.lookup.query(
-            embedding,
-            top_n=self.top_n,
-            softmax_k=self.softmax_k,
-            cycle_length_seconds=self.cycle_length,
-        )
-        if not results:
-            logger.warning("Lookup returned no results")
+        if latest is None:
             return
 
-        self._playlist = results
-        self._playlist_index = 0
-        self._dwell_remaining = results[0]["dwell_seconds"]
-        logger.debug(
-            "Playlist updated: best match %s (dwell=%.1fs)",
-            results[0]["track_id"],
-            results[0]["dwell_seconds"],
+        table = self.lookup.query(
+            latest,
+            softmax_k=self.softmax_k,
+            dwell_k=self.dwell_k,
+            brightness_k=self.brightness_k,
+            min_dwell=self.min_dwell,
+            max_dwell=self.max_dwell,
         )
 
-        # Load first frame if we have nothing yet
-        if self._current_frame is None:
-            self._current_frame = self._load_frame(results[0]["track_id"])
-
-    def _tick(self, dt: float) -> None:
-        if self._current_frame is None:
-            return  # Nothing to show yet
+        # Start brightness fade toward new target immediately
+        self._brightness_target = table.brightness
+        self._brightness_fade_remaining = self.brightness_fade_seconds
+        logger.debug("New table: brightness_target=%.2f", table.brightness)
 
         if self._in_crossfade:
-            self._crossfade_elapsed += dt
-            alpha = min(self._crossfade_elapsed / self.crossfade_seconds, 1.0)
-            frame = crossfade(self._current_frame, self._next_frame, alpha)
-            self.display.show_frame(frame)
-            if alpha >= 1.0:
-                self._current_frame = self._next_frame
-                self._next_frame = None
-                self._in_crossfade = False
-                self._crossfade_elapsed = 0.0
+            # Don't interrupt crossfade — hold for next boundary
+            self._pending_table = table
+        elif self._table is None:
+            # First table — bootstrap display
+            self._table = table
+            self._start_next_cover()
+        else:
+            self._pending_table = table
+
+    # ── Per-frame tick ────────────────────────────────────────────────────
+
+    def _tick(self, dt: float) -> None:
+        self._update_brightness(dt)
+
+        if self._current_frame is None:
             return
 
-        # Show current frame
-        self.display.show_frame(self._current_frame)
+        if self._in_crossfade:
+            self._tick_crossfade(dt)
+        else:
+            self._tick_dwell(dt)
 
-        # Count down dwell time
+    def _update_brightness(self, dt: float) -> None:
+        if self._brightness_fade_remaining > 0:
+            step = dt / self.brightness_fade_seconds
+            diff = self._brightness_target - self._brightness
+            self._brightness += diff * min(step / max(self._brightness_fade_remaining, dt), 1.0)
+            self._brightness_fade_remaining = max(0.0, self._brightness_fade_remaining - dt)
+            self._brightness = float(np.clip(self._brightness, 0.0, 1.0))
+
+    def _tick_crossfade(self, dt: float) -> None:
+        self._crossfade_elapsed += dt
+        alpha = min(self._crossfade_elapsed / self.crossfade_seconds, 1.0)
+        frame = crossfade(self._current_frame, self._next_frame, alpha)
+        self.display.show_frame(apply_brightness(frame, self._brightness))
+
+        if alpha >= 1.0:
+            self._current_frame = self._next_frame
+            self._next_frame = None
+            self._in_crossfade = False
+            self._crossfade_elapsed = 0.0
+            # Swap in pending table now that crossfade is done
+            if self._pending_table is not None:
+                self._table = self._pending_table
+                self._pending_table = None
+
+    def _tick_dwell(self, dt: float) -> None:
+        self.display.show_frame(apply_brightness(self._current_frame, self._brightness))
         self._dwell_remaining -= dt
-        if self._dwell_remaining <= 0.0 and self._playlist:
-            self._advance_playlist()
+        if self._dwell_remaining <= 0.0 and self._table is not None:
+            self._start_next_cover()
 
-    def _advance_playlist(self) -> None:
-        if not self._playlist:
+    # ── Cover transitions ─────────────────────────────────────────────────
+
+    def _start_next_cover(self) -> None:
+        """Sample the next cover and begin crossfade (or bootstrap first frame)."""
+        if self._table is None:
             return
-        self._playlist_index = (self._playlist_index + 1) % len(self._playlist)
-        next_entry = self._playlist[self._playlist_index]
-        self._dwell_remaining = next_entry["dwell_seconds"]
-        self._next_frame = self._load_frame(next_entry["track_id"])
-        self._in_crossfade = True
-        self._crossfade_elapsed = 0.0
+
+        track_id, dwell = self._table.sample()
+        self._dwell_remaining = dwell
+        next_frame = self._load_frame(track_id)
+
+        if self._current_frame is None:
+            # Bootstrap: show first frame immediately, no crossfade
+            self._current_frame = next_frame
+            logger.debug("Bootstrap: first cover %s (dwell=%.1fs)", track_id, dwell)
+        else:
+            self._next_frame = next_frame
+            self._in_crossfade = True
+            self._crossfade_elapsed = 0.0
+            logger.debug("Next cover: %s (dwell=%.1fs)", track_id, dwell)
+
+    # ── Art loading ───────────────────────────────────────────────────────
 
     def _load_frame(self, track_id: str) -> np.ndarray:
+        if track_id in self._art_cache:
+            return self._art_cache[track_id]
+
         from albart.pipeline.database import DB_PATH, get_connection
         conn = get_connection(DB_PATH)
         row = conn.execute(
             "SELECT art_path_32 FROM tracks WHERE track_id = ?", (track_id,)
         ).fetchone()
         conn.close()
+
         if row and row["art_path_32"]:
             try:
-                return load_art_32(row["art_path_32"])
+                frame = load_art_32(row["art_path_32"])
+                self._art_cache[track_id] = frame
+                return frame
             except Exception as e:
                 logger.error("Failed to load art for %s: %s", track_id, e)
-        # Fallback: black frame
-        return np.zeros((32, 32, 3), dtype=np.uint8)
+
+        blank = np.zeros((32, 32, 3), dtype=np.uint8)
+        self._art_cache[track_id] = blank
+        return blank

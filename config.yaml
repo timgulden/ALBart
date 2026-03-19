@@ -8,12 +8,24 @@ pipeline:
   art_source_size: 300      # pixel width of source art to request from Spotify
 
 runtime:
-  embedding_interval_seconds: 10
+  # Embedding
+  embedding_interval_seconds: 10  # seconds between embeddings; 0 = continuous
   buffer_length_seconds: 10
-  top_n_neighbors: 10
-  cycle_length_seconds: 60
-  softmax_k: 5.0
-  crossfade_seconds: 0.75
+
+  # Sampling (alias method over full track set)
+  softmax_k: 5.0        # weight sharpness for sampling; higher = stronger tracks dominate more
+
+  # Dwell time (absolute, per-track)
+  dwell_k: 3.0          # tune so that a "real" music match approaches max_dwell
+  min_dwell_seconds: 1.0
+  max_dwell_seconds: 10.0
+
+  # Brightness (driven by nearest-neighbor distance)
+  brightness_k: 2.0     # tune so silence feels dim and music feels lit
+  brightness_fade_seconds: 1.0
+
+  # Display
+  crossfade_seconds: 1.0
   display_fps: 30
-  display_mode: "sim"       # "sim" or "hub75"
-  sim_scale: 16             # pixels per LED in sim mode
+  display_mode: "sim"   # "sim" or "hub75"
+  sim_scale: 16         # pixels per LED in sim mode

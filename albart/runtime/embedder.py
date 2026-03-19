@@ -59,7 +59,8 @@ class EmbeddingWorker:
             except Exception as e:
                 logger.error("Embedding error: %s", e)
 
-            # Sleep for the remainder of the interval
+            # Sleep for the remainder of the interval.
+            # interval=0 means continuous: recompute immediately after finishing.
             sleep_time = self.interval - (time.monotonic() - t0)
             if sleep_time > 0:
                 self._stop_event.wait(timeout=sleep_time)
