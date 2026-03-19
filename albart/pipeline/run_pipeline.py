@@ -13,7 +13,7 @@ import librosa
 import numpy as np
 from tqdm import tqdm
 
-from albart.pipeline import database, downloader, embedder, itunes, preprocess, spotify
+from albart.pipeline import database, deezer, downloader, embedder, itunes, preprocess, spotify
 from albart.utils import DATA_DIR, load_config
 
 logging.basicConfig(
@@ -47,27 +47,34 @@ def run(force: bool = False) -> None:
                 continue
             database.upsert_track(conn, track)
 
-    # --- iTunes preview URL lookup for tracks with no Spotify preview ---
+    # --- Preview URL lookup: iTunes then Deezer as fallback ---
     needs_preview = [
         t for t in database.get_all_tracks(conn)
         if t["preview_url"] is None and (force or t["embedding_status"] != "ok")
     ]
     if needs_preview:
-        print(f"Looking up iTunes preview URLs for {len(needs_preview)} tracks...")
-        found = 0
-        for row in tqdm(needs_preview, desc="iTunes lookup"):
+        print(f"Looking up preview URLs for {len(needs_preview)} tracks (iTunes → Deezer)...")
+        itunes_found = deezer_found = 0
+        for row in tqdm(needs_preview, desc="Preview lookup"):
             url = itunes.lookup_preview_url(row["title"], row["artist"])
+            if url:
+                itunes_found += 1
+            else:
+                url = deezer.lookup_preview_url(row["title"], row["artist"])
+                if url:
+                    deezer_found += 1
+
             if url:
                 with conn:
                     conn.execute(
                         "UPDATE tracks SET preview_url=?, embedding_status='pending' WHERE track_id=?",
                         (url, row["track_id"]),
                     )
-                found += 1
             else:
                 with conn:
                     database.update_embedding_status(conn, row["track_id"], "no_preview")
-        print(f"Found iTunes previews for {found} of {len(needs_preview)} tracks.")
+        print(f"Found previews for {itunes_found + deezer_found} tracks "
+              f"(iTunes: {itunes_found}, Deezer: {deezer_found}).")
 
     # --- Download and preprocess ---
     to_process = [
@@ -138,18 +145,32 @@ def run(force: bool = False) -> None:
                 database.update_embedding_status(conn, track_id, "error")
 
     # --- Rebuild FAISS index from all OK tracks ---
-    all_ok = [t for t in database.get_all_tracks(conn) if t["embedding_status"] == "ok"]
-    if all_ok:
-        print(f"Rebuilding FAISS index from {len(all_ok)} embedded tracks...")
-        # Load all embeddings by re-embedding won't work; we need stored vectors.
-        # For now, build index only from newly embedded tracks in this run.
-        # TODO: persist embeddings to disk for incremental index rebuilds.
-        if new_ids:
-            embeddings_array = np.stack(new_embeddings).astype(np.float32)
-            embedder.build_and_save_index(embeddings_array, new_ids)
+    # Load previously stored embeddings and merge with newly computed ones.
+    EMBEDDINGS_STORE = DATA_DIR / "embeddings.npy"
+    IDS_STORE = DATA_DIR / "faiss_ids.npy"
+
+    if not force and EMBEDDINGS_STORE.exists() and IDS_STORE.exists() and new_ids:
+        prev_embeddings = np.load(str(EMBEDDINGS_STORE))
+        prev_ids = np.load(str(IDS_STORE), allow_pickle=True).tolist()
+        # Remove any IDs being re-embedded this run to avoid duplicates
+        new_id_set = set(new_ids)
+        keep = [i for i, tid in enumerate(prev_ids) if tid not in new_id_set]
+        prev_embeddings = prev_embeddings[keep]
+        prev_ids = [prev_ids[i] for i in keep]
+        all_embeddings = np.concatenate([prev_embeddings, np.stack(new_embeddings)], axis=0)
+        all_ids = prev_ids + new_ids
     elif new_ids:
-        embeddings_array = np.stack(new_embeddings).astype(np.float32)
-        embedder.build_and_save_index(embeddings_array, new_ids)
+        all_embeddings = np.stack(new_embeddings).astype(np.float32)
+        all_ids = new_ids
+    else:
+        all_embeddings = None
+        all_ids = []
+
+    if all_ids:
+        all_embeddings = all_embeddings.astype(np.float32)
+        np.save(str(EMBEDDINGS_STORE), all_embeddings)
+        embedder.build_and_save_index(all_embeddings, all_ids)
+        print(f"FAISS index built with {len(all_ids)} tracks.")
 
     # --- Summary ---
     all_final = database.get_all_tracks(conn)
