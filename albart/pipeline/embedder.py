@@ -44,7 +44,7 @@ def embed_audio(
     Returns a (512,) float32 numpy array.
     """
     inputs = processor(
-        audios=audio,
+        audio=audio,
         sampling_rate=SAMPLE_RATE,
         return_tensors="pt",
     )
