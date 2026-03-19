@@ -1,5 +1,7 @@
 """SQLite database schema and access for the ALBart pipeline."""
 
+from __future__ import annotations
+
 import logging
 import sqlite3
 from pathlib import Path

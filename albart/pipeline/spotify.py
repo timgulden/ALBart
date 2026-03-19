@@ -1,5 +1,7 @@
 """Spotify API client: authenticate and pull top tracks."""
 
+from __future__ import annotations
+
 import logging
 import os
 

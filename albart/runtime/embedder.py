@@ -1,5 +1,7 @@
 """Runtime CLAP embedder: loads model once, runs in a background thread."""
 
+from __future__ import annotations
+
 import logging
 import queue
 import threading

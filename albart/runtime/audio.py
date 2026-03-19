@@ -1,5 +1,7 @@
 """Mic capture with a thread-safe circular buffer."""
 
+from __future__ import annotations
+
 import logging
 import threading
 

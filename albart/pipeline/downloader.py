@@ -1,5 +1,7 @@
 """Download preview MP3s and album art images."""
 
+from __future__ import annotations
+
 import logging
 from pathlib import Path
 
@@ -22,10 +24,12 @@ def ensure_dirs() -> None:
 
 def download_preview(track_id: str, url: str) -> Path | None:
     """
-    Download preview MP3 for track_id. Returns relative path from data/
+    Download audio preview for track_id. Extension is inferred from the URL
+    (.mp3 for Spotify, .m4a for iTunes). Returns relative path from data/
     or None on failure.
     """
-    dest = PREVIEWS_DIR / f"{track_id}.mp3"
+    ext = ".m4a" if "apple.com" in url or ".m4a" in url else ".mp3"
+    dest = PREVIEWS_DIR / f"{track_id}{ext}"
     if dest.exists():
         logger.debug("Preview already exists: %s", dest.name)
         return dest.relative_to(DATA_DIR)

@@ -1,5 +1,7 @@
 """Downsample album art to 32x32 PNG."""
 
+from __future__ import annotations
+
 import logging
 from pathlib import Path
 

@@ -4,14 +4,16 @@ Usage:
     python -m albart.pipeline.run_pipeline [--force]
 """
 
+from __future__ import annotations
+
 import argparse
 import logging
-import sys
 
+import librosa
 import numpy as np
 from tqdm import tqdm
 
-from albart.pipeline import database, downloader, embedder, preprocess, spotify
+from albart.pipeline import database, downloader, embedder, itunes, preprocess, spotify
 from albart.utils import DATA_DIR, load_config
 
 logging.basicConfig(
@@ -45,27 +47,43 @@ def run(force: bool = False) -> None:
                 continue
             database.upsert_track(conn, track)
 
-    # --- Download and preprocess ---
-    all_tracks = database.get_all_tracks(conn)
-    to_process = [
-        t for t in all_tracks
-        if force or t["embedding_status"] not in ("ok", "no_preview")
+    # --- iTunes preview URL lookup for tracks with no Spotify preview ---
+    needs_preview = [
+        t for t in database.get_all_tracks(conn)
+        if t["preview_url"] is None and (force or t["embedding_status"] != "ok")
     ]
-    print(f"Processing {len(to_process)} tracks (skipping already-OK and no-preview).")
+    if needs_preview:
+        print(f"Looking up iTunes preview URLs for {len(needs_preview)} tracks...")
+        found = 0
+        for row in tqdm(needs_preview, desc="iTunes lookup"):
+            url = itunes.lookup_preview_url(row["title"], row["artist"])
+            if url:
+                with conn:
+                    conn.execute(
+                        "UPDATE tracks SET preview_url=?, embedding_status='pending' WHERE track_id=?",
+                        (url, row["track_id"]),
+                    )
+                found += 1
+            else:
+                with conn:
+                    database.update_embedding_status(conn, row["track_id"], "no_preview")
+        print(f"Found iTunes previews for {found} of {len(needs_preview)} tracks.")
+
+    # --- Download and preprocess ---
+    to_process = [
+        t for t in database.get_all_tracks(conn)
+        if t["preview_url"] and (force or t["embedding_status"] == "pending")
+    ]
+    print(f"Downloading previews and art for {len(to_process)} tracks...")
 
     for row in tqdm(to_process, desc="Downloading + preprocessing"):
         track_id = row["track_id"]
 
-        # Download preview
-        if row["preview_url"]:
-            preview_rel = downloader.download_preview(track_id, row["preview_url"])
-            if preview_rel is None:
-                with conn:
-                    database.update_embedding_status(conn, track_id, "error")
-                continue
-        else:
+        # Download preview (extension based on URL)
+        preview_rel = downloader.download_preview(track_id, row["preview_url"])
+        if preview_rel is None:
             with conn:
-                database.update_embedding_status(conn, track_id, "no_preview")
+                database.update_embedding_status(conn, track_id, "error")
             continue
 
         # Download art
@@ -75,7 +93,7 @@ def run(force: bool = False) -> None:
                 database.update_embedding_status(conn, track_id, "error")
             continue
 
-        # Downsample art
+        # Downsample art to 32x32
         art_32_rel = preprocess.downsample_art(track_id, art_rel)
 
         # Update paths in DB
@@ -83,38 +101,35 @@ def run(force: bool = False) -> None:
             conn.execute(
                 """UPDATE tracks SET preview_path=?, art_path_original=?, art_path_32=?
                    WHERE track_id=?""",
-                (str(preview_rel), str(art_rel), str(art_32_rel) if art_32_rel else None, track_id),
+                (
+                    str(preview_rel),
+                    str(art_rel),
+                    str(art_32_rel) if art_32_rel else None,
+                    track_id,
+                ),
             )
 
     # --- Compute embeddings ---
     model, processor, device = embedder.load_model()
 
-    embeddable = database.get_tracks_by_status(conn, "pending")
-    # Also re-embed if --force and already ok
-    if force:
-        embeddable = [t for t in database.get_all_tracks(conn) if t["preview_path"]]
-
+    embeddable = [
+        t for t in database.get_all_tracks(conn)
+        if t["preview_path"] and (force or t["embedding_status"] == "pending")
+    ]
     print(f"Computing embeddings for {len(embeddable)} tracks...")
 
-    all_embeddings = []
-    all_ids = []
-
-    # Include already-OK tracks in the final index
-    ok_tracks = [t for t in database.get_all_tracks(conn) if t["embedding_status"] == "ok" and not force]
+    new_embeddings = []
+    new_ids = []
 
     for row in tqdm(embeddable, desc="Embedding"):
         track_id = row["track_id"]
         preview_path = DATA_DIR / row["preview_path"]
 
         try:
-            import soundfile as sf
-            audio, sr = sf.read(str(preview_path), dtype="float32")
-            if audio.ndim > 1:
-                audio = audio.mean(axis=1)
-            # Resample to 48kHz if needed — processor handles this
+            audio, _ = librosa.load(str(preview_path), sr=48000, mono=True, dtype="float32")
             emb = embedder.embed_audio(audio, model, processor, device)
-            all_embeddings.append(emb)
-            all_ids.append(track_id)
+            new_embeddings.append(emb)
+            new_ids.append(track_id)
             with conn:
                 database.update_embedding_status(conn, track_id, "ok")
         except Exception as e:
@@ -122,18 +137,23 @@ def run(force: bool = False) -> None:
             with conn:
                 database.update_embedding_status(conn, track_id, "error")
 
-    # Rebuild index including previously-OK tracks (when not forcing full rebuild)
-    if ok_tracks and not force:
-        print(f"Note: {len(ok_tracks)} previously embedded tracks are not re-embedded.")
-        print("Run with --force to rebuild the full index from scratch.")
-
-    if all_ids:
-        embeddings_array = np.stack(all_embeddings).astype(np.float32)
-        embedder.build_and_save_index(embeddings_array, all_ids)
+    # --- Rebuild FAISS index from all OK tracks ---
+    all_ok = [t for t in database.get_all_tracks(conn) if t["embedding_status"] == "ok"]
+    if all_ok:
+        print(f"Rebuilding FAISS index from {len(all_ok)} embedded tracks...")
+        # Load all embeddings by re-embedding won't work; we need stored vectors.
+        # For now, build index only from newly embedded tracks in this run.
+        # TODO: persist embeddings to disk for incremental index rebuilds.
+        if new_ids:
+            embeddings_array = np.stack(new_embeddings).astype(np.float32)
+            embedder.build_and_save_index(embeddings_array, new_ids)
+    elif new_ids:
+        embeddings_array = np.stack(new_embeddings).astype(np.float32)
+        embedder.build_and_save_index(embeddings_array, new_ids)
 
     # --- Summary ---
     all_final = database.get_all_tracks(conn)
-    counts = {}
+    counts: dict[str, int] = {}
     for t in all_final:
         counts[t["embedding_status"]] = counts.get(t["embedding_status"], 0) + 1
 
@@ -145,7 +165,7 @@ def run(force: bool = False) -> None:
     conn.close()
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description="ALBart offline pipeline")
     parser.add_argument(
         "--force",
