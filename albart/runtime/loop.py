@@ -73,10 +73,12 @@ class DisplayLoop:
         self._in_crossfade: bool = False
         self._crossfade_elapsed: float = 0.0
 
-        # Brightness state
-        self._brightness: float = 0.0       # current rendered brightness
+        # Brightness state — linear fade from _brightness_start to _brightness_target
+        self._brightness: float = 0.0
+        self._brightness_start: float = 0.0
         self._brightness_target: float = 0.0
-        self._brightness_fade_remaining: float = 0.0
+        self._brightness_fade_elapsed: float = 0.0
+        self._brightness_fading: bool = False
 
         # Alias tables
         self._table: AliasTable | None = None
@@ -122,9 +124,11 @@ class DisplayLoop:
             max_dwell=self.max_dwell,
         )
 
-        # Start brightness fade toward new target immediately
+        # Start linear brightness fade toward new target immediately
+        self._brightness_start = self._brightness
         self._brightness_target = table.brightness
-        self._brightness_fade_remaining = self.brightness_fade_seconds
+        self._brightness_fade_elapsed = 0.0
+        self._brightness_fading = True
         logger.debug("New table: brightness_target=%.2f", table.brightness)
 
         if self._in_crossfade:
@@ -151,12 +155,16 @@ class DisplayLoop:
             self._tick_dwell(dt)
 
     def _update_brightness(self, dt: float) -> None:
-        if self._brightness_fade_remaining > 0:
-            step = dt / self.brightness_fade_seconds
-            diff = self._brightness_target - self._brightness
-            self._brightness += diff * min(step / max(self._brightness_fade_remaining, dt), 1.0)
-            self._brightness_fade_remaining = max(0.0, self._brightness_fade_remaining - dt)
-            self._brightness = float(np.clip(self._brightness, 0.0, 1.0))
+        if not self._brightness_fading:
+            return
+        self._brightness_fade_elapsed += dt
+        alpha = min(self._brightness_fade_elapsed / self.brightness_fade_seconds, 1.0)
+        self._brightness = self._brightness_start + alpha * (
+            self._brightness_target - self._brightness_start
+        )
+        if alpha >= 1.0:
+            self._brightness = self._brightness_target
+            self._brightness_fading = False
 
     def _tick_crossfade(self, dt: float) -> None:
         self._crossfade_elapsed += dt
@@ -169,10 +177,6 @@ class DisplayLoop:
             self._next_frame = None
             self._in_crossfade = False
             self._crossfade_elapsed = 0.0
-            # Swap in pending table now that crossfade is done
-            if self._pending_table is not None:
-                self._table = self._pending_table
-                self._pending_table = None
 
     def _tick_dwell(self, dt: float) -> None:
         self.display.show_frame(apply_brightness(self._current_frame, self._brightness))
@@ -186,6 +190,11 @@ class DisplayLoop:
         """Sample the next cover and begin crossfade (or bootstrap first frame)."""
         if self._table is None:
             return
+
+        # Swap in pending table at cover boundary (before sampling)
+        if self._pending_table is not None:
+            self._table = self._pending_table
+            self._pending_table = None
 
         track_id, dwell = self._table.sample()
         self._dwell_remaining = dwell

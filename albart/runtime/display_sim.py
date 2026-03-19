@@ -21,6 +21,7 @@ class SimDisplay(DisplayBackend):
 
     def __init__(self, scale: int = 16) -> None:
         self.scale = scale
+        self._closed = False
         window_size = LED_SIZE * scale
         pygame.init()
         self.screen = pygame.display.set_mode((window_size, window_size))
@@ -33,6 +34,8 @@ class SimDisplay(DisplayBackend):
         )
 
     def show_frame(self, rgb_array: np.ndarray) -> None:
+        if self._closed:
+            return
         assert rgb_array.shape == (LED_SIZE, LED_SIZE, 3), (
             f"Expected (32, 32, 3), got {rgb_array.shape}"
         )
@@ -53,5 +56,7 @@ class SimDisplay(DisplayBackend):
         pygame.display.flip()
 
     def close(self) -> None:
-        pygame.quit()
-        logger.info("SimDisplay closed")
+        if not self._closed:
+            self._closed = True
+            pygame.quit()
+            logger.info("SimDisplay closed")

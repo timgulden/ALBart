@@ -26,6 +26,9 @@ class EmbeddingWorker:
         audio_buffer: AudioBuffer,
         result_queue: queue.Queue,
         interval_seconds: float = 10.0,
+        model=None,
+        processor=None,
+        device: str | None = None,
     ) -> None:
         self.audio_buffer = audio_buffer
         self.result_queue = result_queue
@@ -33,9 +36,13 @@ class EmbeddingWorker:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
 
-        logger.info("Loading CLAP model for runtime...")
-        self.model, self.processor, self.device = load_model()
-        logger.info("CLAP model ready on %s", self.device)
+        if model is not None:
+            self.model, self.processor, self.device = model, processor, device
+            logger.info("EmbeddingWorker using pre-loaded CLAP model on %s", device)
+        else:
+            logger.info("Loading CLAP model for runtime...")
+            self.model, self.processor, self.device = load_model()
+            logger.info("CLAP model ready on %s", self.device)
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, daemon=True, name="EmbeddingWorker")
