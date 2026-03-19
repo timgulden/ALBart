@@ -2,6 +2,10 @@
 
 Usage:
     python -m albart.pipeline.run_pipeline [--force]
+
+Design note: Deezer preview URLs contain signed tokens that expire within
+~90 minutes of generation. The lookup and download steps are therefore merged
+into a single pass — each URL is downloaded immediately after being fetched.
 """
 
 from __future__ import annotations
@@ -47,74 +51,80 @@ def run(force: bool = False) -> None:
                 continue
             database.upsert_track(conn, track)
 
-    # --- Preview URL lookup: iTunes then Deezer as fallback ---
-    needs_preview = [
+    # --- Reset errored tracks that have no preview file (stale/expired URLs) ---
+    # Their stored preview_url is either expired or invalid — clear it for re-lookup.
+    with conn:
+        conn.execute(
+            "UPDATE tracks SET preview_url=NULL WHERE embedding_status='error' AND preview_path IS NULL"
+        )
+    reset_count = conn.execute(
+        "SELECT COUNT(*) FROM tracks WHERE embedding_status='error' AND preview_path IS NULL"
+    ).fetchone()[0]
+    # (count is 0 after the reset above; this just confirms the clear ran)
+
+    # --- Lookup + download + preprocess (atomic per track) ---
+    # Deezer URLs expire ~90 minutes after generation, so we download immediately
+    # after fetching rather than storing URLs for a later download pass.
+    needs_work = [
         t for t in database.get_all_tracks(conn)
-        if t["preview_url"] is None and (force or t["embedding_status"] != "ok")
+        if t["preview_path"] is None
+        and (force or t["embedding_status"] not in ("ok", "no_preview"))
     ]
-    if needs_preview:
-        print(f"Looking up preview URLs for {len(needs_preview)} tracks (Deezer → iTunes)...")
-        itunes_found = deezer_found = 0
-        for row in tqdm(needs_preview, desc="Preview lookup"):
-            url = deezer.lookup_preview_url(row["title"], row["artist"])
-            if url:
-                deezer_found += 1
-            else:
-                url = itunes.lookup_preview_url(row["title"], row["artist"])
-                if url:
-                    itunes_found += 1
+    print(f"Looking up and downloading previews for {len(needs_work)} tracks (Deezer → iTunes)...")
 
-            if url:
-                with conn:
-                    conn.execute(
-                        "UPDATE tracks SET preview_url=?, embedding_status='pending' WHERE track_id=?",
-                        (url, row["track_id"]),
-                    )
-            else:
-                with conn:
-                    database.update_embedding_status(conn, row["track_id"], "no_preview")
-        print(f"Found previews for {itunes_found + deezer_found} tracks "
-              f"(Deezer: {deezer_found}, iTunes fallback: {itunes_found}).")
+    deezer_found = itunes_found = 0
 
-    # --- Download and preprocess ---
-    to_process = [
-        t for t in database.get_all_tracks(conn)
-        if t["preview_url"] and (force or t["embedding_status"] == "pending")
-    ]
-    print(f"Downloading previews and art for {len(to_process)} tracks...")
-
-    for row in tqdm(to_process, desc="Downloading + preprocessing"):
+    for row in tqdm(needs_work, desc="Lookup + download"):
         track_id = row["track_id"]
 
-        # Download preview (extension based on URL)
-        preview_rel = downloader.download_preview(track_id, row["preview_url"])
+        # --- Look up preview URL ---
+        url = deezer.lookup_preview_url(row["title"], row["artist"])
+        if url:
+            deezer_found += 1
+        else:
+            url = itunes.lookup_preview_url(row["title"], row["artist"])
+            if url:
+                itunes_found += 1
+
+        if not url:
+            with conn:
+                database.update_embedding_status(conn, track_id, "no_preview")
+            continue
+
+        # --- Download preview immediately (before URL expires) ---
+        preview_rel = downloader.download_preview(track_id, url)
         if preview_rel is None:
             with conn:
                 database.update_embedding_status(conn, track_id, "error")
             continue
 
-        # Download art
+        # --- Download art ---
         art_rel = downloader.download_art(track_id, row["art_url"])
         if art_rel is None:
             with conn:
                 database.update_embedding_status(conn, track_id, "error")
             continue
 
-        # Downsample art to 32x32
+        # --- Downsample art to 32x32 ---
         art_32_rel = preprocess.downsample_art(track_id, art_rel)
 
-        # Update paths in DB
+        # --- Persist URL and paths ---
         with conn:
             conn.execute(
-                """UPDATE tracks SET preview_path=?, art_path_original=?, art_path_32=?
+                """UPDATE tracks
+                   SET preview_url=?, preview_path=?, art_path_original=?, art_path_32=?
                    WHERE track_id=?""",
                 (
+                    url,
                     str(preview_rel),
                     str(art_rel),
                     str(art_32_rel) if art_32_rel else None,
                     track_id,
                 ),
             )
+
+    print(f"Found previews: Deezer={deezer_found}  iTunes={itunes_found}  "
+          f"total new={deezer_found + itunes_found}")
 
     # --- Compute embeddings ---
     model, processor, device = embedder.load_model()
@@ -144,21 +154,19 @@ def run(force: bool = False) -> None:
             with conn:
                 database.update_embedding_status(conn, track_id, "error")
 
-    # --- Rebuild FAISS index from all OK tracks ---
-    # Load previously stored embeddings and merge with newly computed ones.
+    # --- Rebuild FAISS index (merge new embeddings with previously stored ones) ---
     EMBEDDINGS_STORE = DATA_DIR / "embeddings.npy"
-    IDS_STORE = DATA_DIR / "faiss_ids.npy"
+    IDS_STORE        = DATA_DIR / "faiss_ids.npy"
 
     if not force and EMBEDDINGS_STORE.exists() and IDS_STORE.exists() and new_ids:
         prev_embeddings = np.load(str(EMBEDDINGS_STORE))
         prev_ids = np.load(str(IDS_STORE), allow_pickle=True).tolist()
-        # Remove any IDs being re-embedded this run to avoid duplicates
         new_id_set = set(new_ids)
         keep = [i for i, tid in enumerate(prev_ids) if tid not in new_id_set]
-        prev_embeddings = prev_embeddings[keep]
-        prev_ids = [prev_ids[i] for i in keep]
-        all_embeddings = np.concatenate([prev_embeddings, np.stack(new_embeddings)], axis=0)
-        all_ids = prev_ids + new_ids
+        all_embeddings = np.concatenate(
+            [prev_embeddings[keep], np.stack(new_embeddings)], axis=0
+        ).astype(np.float32)
+        all_ids = [prev_ids[i] for i in keep] + new_ids
     elif new_ids:
         all_embeddings = np.stack(new_embeddings).astype(np.float32)
         all_ids = new_ids
@@ -167,7 +175,6 @@ def run(force: bool = False) -> None:
         all_ids = []
 
     if all_ids:
-        all_embeddings = all_embeddings.astype(np.float32)
         np.save(str(EMBEDDINGS_STORE), all_embeddings)
         embedder.build_and_save_index(all_embeddings, all_ids)
         print(f"FAISS index built with {len(all_ids)} tracks.")
