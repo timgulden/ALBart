@@ -80,12 +80,12 @@ def _normalize_track(item: dict) -> dict | None:
             "title": title,
             "artist": artist,
             "album": album,
-            "preview_url": preview_url,
+            "preview_url": None,
             "preview_path": None,
             "art_url": art_url,
             "art_path_original": None,
             "art_path_32": None,
-            "embedding_status": "no_preview" if preview_url is None else "pending",
+            "embedding_status": "pending",
         }
     except (KeyError, TypeError) as e:
         logger.error("Failed to normalize track: %s", e)

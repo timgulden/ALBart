@@ -56,12 +56,7 @@ def upsert_track(conn: sqlite3.Connection, track: dict) -> None:
             title=excluded.title,
             artist=excluded.artist,
             album=excluded.album,
-            preview_url=excluded.preview_url,
-            preview_path=excluded.preview_path,
-            art_url=excluded.art_url,
-            art_path_original=excluded.art_path_original,
-            art_path_32=excluded.art_path_32,
-            embedding_status=excluded.embedding_status
+            art_url=excluded.art_url
         """,
         track,
     )

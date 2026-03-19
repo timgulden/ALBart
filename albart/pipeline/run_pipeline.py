@@ -27,7 +27,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def run(force: bool = False) -> None:
+def run(force: bool = False, skip_spotify: bool = False) -> None:
     config = load_config()
     _ = config  # reserved for future pipeline config keys
 
@@ -36,20 +36,24 @@ def run(force: bool = False) -> None:
     downloader.ensure_dirs()
     preprocess.ensure_dirs()
 
-    # --- Spotify pull ---
-    print("Authenticating with Spotify...")
-    sp = spotify.get_client()
-    tracks = spotify.fetch_top_tracks(sp)
-    print(f"Fetched {len(tracks)} tracks from Spotify.")
-
-    # --- Upsert into DB (skipping already-OK tracks unless --force) ---
     conn = database.get_connection()
-    with conn:
-        for track in tracks:
-            existing = database.get_track(conn, track["track_id"])
-            if existing and existing["embedding_status"] == "ok" and not force:
-                continue
-            database.upsert_track(conn, track)
+
+    if skip_spotify:
+        print("Skipping Spotify pull (--skip-spotify).")
+    else:
+        # --- Spotify pull ---
+        print("Authenticating with Spotify...")
+        sp = spotify.get_client()
+        tracks = spotify.fetch_top_tracks(sp)
+        print(f"Fetched {len(tracks)} tracks from Spotify.")
+
+        # --- Upsert into DB (skipping already-OK tracks unless --force) ---
+        with conn:
+            for track in tracks:
+                existing = database.get_track(conn, track["track_id"])
+                if existing and existing["embedding_status"] == "ok" and not force:
+                    continue
+                database.upsert_track(conn, track)
 
     # --- Reset errored tracks that have no preview file (stale/expired URLs) ---
     # Their stored preview_url is either expired or invalid — clear it for re-lookup.
@@ -200,8 +204,13 @@ def main() -> None:
         action="store_true",
         help="Reprocess all tracks, ignoring existing status",
     )
+    parser.add_argument(
+        "--skip-spotify",
+        action="store_true",
+        help="Skip the Spotify pull (use tracks already in DB)",
+    )
     args = parser.parse_args()
-    run(force=args.force)
+    run(force=args.force, skip_spotify=args.skip_spotify)
 
 
 if __name__ == "__main__":
