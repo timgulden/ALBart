@@ -139,6 +139,9 @@ def run(force: bool = False, skip_spotify: bool = False) -> None:
     ]
     print(f"Computing embeddings for {len(embeddable)} tracks...")
 
+    CHUNK_SAMPLES = 10 * 48000  # 10s at 48kHz (processor max_length_s for unfused models)
+    N_CHUNKS = 3                 # embed 3 chunks, average into one vector per track
+
     new_embeddings = []
     new_ids = []
 
@@ -148,7 +151,21 @@ def run(force: bool = False, skip_spotify: bool = False) -> None:
 
         try:
             audio, _ = librosa.load(str(preview_path), sr=48000, mono=True, dtype="float32")
-            emb = embedder.embed_audio(audio, model, processor, device)
+            # Embed N_CHUNKS × 10s windows and average — one representative vector per track
+            chunk_embs = []
+            for i in range(N_CHUNKS):
+                start = i * CHUNK_SAMPLES
+                chunk = audio[start:start + CHUNK_SAMPLES]
+                if len(chunk) == 0:
+                    break
+                if len(chunk) < CHUNK_SAMPLES:
+                    chunk = np.pad(chunk, (0, CHUNK_SAMPLES - len(chunk)))
+                chunk_embs.append(embedder.embed_audio(chunk, model, processor, device))
+            emb = np.mean(chunk_embs, axis=0).astype(np.float32)
+            # Renormalize: mean of unit vectors is not a unit vector;
+            # FlatL2 on unit vectors == cosine distance.
+            emb_norm = np.linalg.norm(emb)
+            emb = (emb / (emb_norm + 1e-8)).astype(np.float32)
             new_embeddings.append(emb)
             new_ids.append(track_id)
             with conn:

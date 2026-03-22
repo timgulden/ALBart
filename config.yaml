@@ -9,23 +9,30 @@ pipeline:
 
 runtime:
   # Embedding
-  embedding_interval_seconds: 10  # seconds between embeddings; 0 = continuous
-  buffer_length_seconds: 10
+  embedding_interval_seconds: 1   # seconds between embeddings; 0 = continuous
+  buffer_length_seconds: 30
+  embedding_alpha: 0.5            # EMA weight for current embedding; 1.0 = no averaging
 
-  # Sampling (alias method over full track set)
-  softmax_k: 5.0        # weight sharpness for sampling; higher = stronger tracks dominate more
+  # Sampling
+  # NOTE: larger_clap_music (normalized) distances are ~0.002–0.010 (vs ~0.05–0.15
+  # for the old unfused tiny model). All k/floor params scaled ~15× accordingly.
+  sampling_top_n: 5     # sample from top-N candidates probabilistically
+  softmax_k: 500.0      # weight sharpness; higher = best match dominates more
 
   # Dwell time (absolute, per-track)
-  dwell_k: 3.0          # tune so that a "real" music match approaches max_dwell
+  dwell_k: 250.0        # decay rate above floor; higher = steeper falloff
+  dwell_floor: 0.003    # distances below this get full max_dwell
   min_dwell_seconds: 1.0
   max_dwell_seconds: 10.0
 
   # Brightness (driven by nearest-neighbor distance)
-  brightness_k: 2.0     # tune so silence feels dim and music feels lit
+  brightness_k: 80.0         # decay rate above the floor; higher = faster falloff
+  brightness_floor: 0.003   # distances below this are treated as full brightness
+  brightness_power: 2.0     # power applied after exp; >1 = steep falloff, try 2-4
   brightness_fade_seconds: 1.0
 
   # Display
   crossfade_seconds: 1.0
   display_fps: 30
   display_mode: "sim"   # "sim" or "hub75"
-  sim_scale: 16         # pixels per LED in sim mode
+  sim_scale: 22         # pixels per LED in sim mode (22 → 704px window, ~7.5" at 96dpi)
