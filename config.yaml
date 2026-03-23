@@ -24,15 +24,18 @@ runtime:
   sampling_rank_decay: 0.85  # weight decay per rank step (rank 1=1.0, rank 2=0.85, …)
 
   # Dwell time (absolute, per-track)
-  dwell_k: 250.0        # decay rate above floor; higher = steeper falloff
-  dwell_floor: 0.003    # distances below this get full max_dwell
+  # Calibrated for clean digital signal (BlackHole): d_min_raw ~0.07–0.09 on good matches.
+  # d=0.079 → ~8s; d=0.10 → ~4.7s; d=0.15 → floors at 1s.
+  dwell_k: 25.0         # decay rate above floor; higher = steeper falloff
+  dwell_floor: 0.07     # distances below this get full max_dwell
   min_dwell_seconds: 1.0
   max_dwell_seconds: 10.0
 
   # Brightness (driven by nearest-neighbor distance)
-  brightness_k: 80.0         # decay rate above the floor; higher = faster falloff
-  brightness_floor: 0.003   # distances below this are treated as full brightness
-  brightness_power: 2.0     # power applied after exp; >1 = steep falloff, try 2-4
+  # d=0.079 → ~0.76; d=0.10 → ~0.41; d=0.15 → below brightness_min (clipped to 0.15).
+  brightness_k: 20.0         # decay rate above the floor; higher = faster falloff
+  brightness_floor: 0.07    # distances below this are treated as full brightness
+  brightness_power: 1.5     # power applied after exp; >1 = steep falloff
   brightness_fade_seconds: 1.0
   brightness_min: 0.15       # floor brightness — keeps covers visible even with poor match
 

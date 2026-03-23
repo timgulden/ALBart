@@ -2,21 +2,78 @@
 Record audio, embed it with the dual-index approach, and query both FAISS indices.
 Shows fused top-20 results exactly as the runtime would see them.
 
+Records a 10s level-check first, adjusts macOS input volume to hit the AGC
+target, then records the full query window.
+
 Usage:
     python tools/query_live.py [--seconds 30] [--silence]
     python tools/query_live.py --seconds 10  # single 10s chunk
+    python tools/query_live.py --no-agc      # skip level adjustment
 """
 
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import numpy as np
 import sounddevice as sd
+
+# Discrete macOS input volume levels (mirrors agc.py)
+_LEVELS = [20, 25, 32, 40, 50, 63, 79, 100]
+
+
+def _get_input_volume() -> int | None:
+    try:
+        r = subprocess.run(
+            ["osascript", "-e", "input volume of (get volume settings)"],
+            capture_output=True, text=True, timeout=2,
+        )
+        return int(r.stdout.strip())
+    except Exception:
+        return None
+
+
+def _set_input_volume(level: int) -> None:
+    subprocess.run(
+        ["osascript", "-e", f"set volume input volume {level}"],
+        capture_output=True, timeout=2,
+    )
+
+
+def _nearest_level(vol: int) -> int:
+    return min(_LEVELS, key=lambda v: abs(v - vol))
+
+
+def adjust_level(measured_rms: float, target_rms: float) -> None:
+    """Set macOS input volume so recorded RMS will be near target_rms."""
+    vol = _get_input_volume()
+    if vol is None:
+        print("  (cannot read input volume — skipping level adjustment)")
+        return
+
+    if measured_rms < 1e-6:
+        print("  (silence detected — skipping level adjustment)")
+        return
+
+    # Scale the current volume by the ratio needed to hit target
+    scale = target_rms / measured_rms
+    ideal_vol = int(round(vol * scale))
+    ideal_vol = max(_LEVELS[0], min(_LEVELS[-1], ideal_vol))
+    new_vol = _nearest_level(ideal_vol)
+
+    if new_vol == vol:
+        print(f"  Level OK: volume={vol}  RMS={measured_rms:.3f} → no change needed")
+    else:
+        _set_input_volume(new_vol)
+        print(f"  Level adjusted: volume {vol} → {new_vol}  "
+              f"(RMS={measured_rms:.3f}, target={target_rms:.3f})")
+        time.sleep(1.0)  # let the new level settle
 
 from albart.pipeline.embedder import embed_audio, load_model
 from albart.pipeline.database import DB_PATH, get_connection
@@ -58,6 +115,8 @@ def main() -> None:
                         help="Seconds to count down before first chunk (default: 5)")
     parser.add_argument("--device", type=str, default=None,
                         help="Input device name or index (default: system default)")
+    parser.add_argument("--no-agc", action="store_true",
+                        help="Skip the 10s level-check / volume adjustment (macOS only)")
     parser.add_argument("--norm-target-raw",  type=float, default=0.0)
     parser.add_argument("--norm-target-norm", type=float, default=0.12)
     args = parser.parse_args()
@@ -96,6 +155,8 @@ def main() -> None:
     max_dwell           = rt["max_dwell_seconds"]
 
     n_chunks = max(1, args.seconds // CHUNK_SECONDS)
+    agc_target = float(config["runtime"].get("agc_target_rms", 0.20))
+    run_agc = not args.no_agc and not args.silence and sys.platform == "darwin"
 
     print("Loading CLAP model...")
     model, processor, device_str = load_model()
@@ -109,10 +170,19 @@ def main() -> None:
         print(f"Using silence ({n_chunks} chunks of {CHUNK_SECONDS}s)...")
         chunks = [np.zeros(CHUNK_SECONDS * SAMPLE_RATE, dtype=np.float32)] * n_chunks
     else:
+        # --- Level check: record 10s, adjust volume, then record query chunks ---
+        if run_agc:
+            print(f"--- Level check (10s) ---")
+            level_audio = record(CHUNK_SECONDS, countdown=args.countdown, device=audio_device)
+            adjust_level(float(np.sqrt(np.mean(level_audio ** 2))), agc_target)
+            countdown_remaining = 0
+        else:
+            countdown_remaining = args.countdown
+
         chunks = []
         for i in range(n_chunks):
             label = f"chunk {i+1}/{n_chunks}"
-            cd = args.countdown if i == 0 else 0
+            cd = countdown_remaining if i == 0 else 0
             print(f"--- Recording {label} ---")
             chunks.append(record(CHUNK_SECONDS, countdown=cd, device=audio_device))
 
