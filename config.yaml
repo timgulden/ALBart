@@ -32,8 +32,8 @@ runtime:
   max_dwell_seconds: 10.0
 
   # Brightness (driven by nearest-neighbor distance)
-  # d=0.079 → ~0.76; d=0.10 → ~0.41; d=0.15 → below brightness_min (clipped to 0.15).
-  brightness_k: 20.0         # decay rate above the floor; higher = faster falloff
+  # d=0.079 → ~0.71; d=0.10 → ~0.33; d=0.12 → clipped to brightness_min (0.15).
+  brightness_k: 25.0         # decay rate above the floor; higher = faster falloff
   brightness_floor: 0.07    # distances below this are treated as full brightness
   brightness_power: 1.5     # power applied after exp; >1 = steep falloff
   brightness_fade_seconds: 1.0

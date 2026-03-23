@@ -52,8 +52,12 @@ def main() -> None:
         help="UDP port to receive embeddings on (default: 57001)",
     )
     parser.add_argument(
-        "--trail-minutes", type=float, default=20.0,
-        help="Trail fade duration in minutes (default: 20)",
+        "--trail-minutes", type=float, default=1.5,
+        help="Trail fade duration in minutes (default: 1.5)",
+    )
+    parser.add_argument(
+        "--no-voronoi-lines", action="store_true",
+        help="Hide Voronoi region borders and labels",
     )
     args = parser.parse_args()
 
@@ -76,6 +80,7 @@ def main() -> None:
         brightness_k       = float(rt["brightness_k"]),
         brightness_floor   = float(rt["brightness_floor"]),
         brightness_power   = float(rt["brightness_power"]),
+        show_voronoi       = not args.no_voronoi_lines,
     )
 
     # Bind UDP socket (non-blocking)

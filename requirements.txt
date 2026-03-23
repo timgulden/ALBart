@@ -12,3 +12,6 @@ tqdm
 librosa
 umap-learn
 joblib
+scikit-learn
+shapely
+anthropic
