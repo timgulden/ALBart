@@ -10,3 +10,5 @@ pygame
 pyyaml
 tqdm
 librosa
+umap-learn
+joblib

@@ -52,10 +52,12 @@ class DisplayLoop:
         lookup: DualTrackLookup,
         embedding_queue: queue.Queue,
         config: dict,
+        map_broadcast=None,
     ) -> None:
         self.display = display
         self.lookup = lookup
         self.embedding_queue = embedding_queue
+        self._map_broadcast = map_broadcast  # optional callable(raw, norm, top1_id, d_min_raw)
 
         rt = config["runtime"]
         self.fps = rt["display_fps"]
@@ -66,6 +68,7 @@ class DisplayLoop:
         self.brightness_k = rt["brightness_k"]
         self.brightness_floor = rt["brightness_floor"]
         self.brightness_power = rt["brightness_power"]
+        self.brightness_min = float(rt.get("brightness_min", 0.0))
         self.sampling_top_n = rt["sampling_top_n"]
         self.min_dwell = rt["min_dwell_seconds"]
         self.max_dwell = rt["max_dwell_seconds"]
@@ -140,9 +143,16 @@ class DisplayLoop:
             max_dwell=self.max_dwell,
         )
 
+        # Broadcast to map display process (top-1 from RRF fusion, same as LED)
+        if self._map_broadcast is not None and table.track_ids:
+            try:
+                self._map_broadcast(latest.raw, latest.norm, table.track_ids[0], table.d_min_raw)
+            except Exception as e:
+                logger.debug("Map broadcast error: %s", e)
+
         # Start linear brightness fade toward new target immediately
         self._brightness_start = self._brightness
-        self._brightness_target = table.brightness
+        self._brightness_target = max(self.brightness_min, table.brightness)
         self._brightness_fade_elapsed = 0.0
         self._brightness_fading = True
         logger.debug("New table: brightness_target=%.2f", table.brightness)

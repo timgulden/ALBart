@@ -52,6 +52,7 @@ class EmbeddingWorker:
         model=None,
         processor=None,
         device: str | None = None,
+        on_embedding=None,
     ) -> None:
         self.audio_buffer = audio_buffer
         self.result_queue = result_queue
@@ -63,6 +64,7 @@ class EmbeddingWorker:
         self._ema_norm: np.ndarray | None = None
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._on_embedding = on_embedding  # optional callable(DualEmbedding)
 
         if model is not None:
             self.model, self.processor, self.device = model, processor, device
@@ -121,9 +123,13 @@ class EmbeddingWorker:
                     self._ema_raw  = (raw_ema  / (np.linalg.norm(raw_ema)  + 1e-8)).astype(np.float32)
                     self._ema_norm = (norm_ema / (np.linalg.norm(norm_ema) + 1e-8)).astype(np.float32)
 
-                self.result_queue.put(
-                    DualEmbedding(raw=self._ema_raw.copy(), norm=self._ema_norm.copy())
-                )
+                emb = DualEmbedding(raw=self._ema_raw.copy(), norm=self._ema_norm.copy())
+                self.result_queue.put(emb)
+                if self._on_embedding is not None:
+                    try:
+                        self._on_embedding(emb)
+                    except Exception as cb_err:
+                        logger.debug("on_embedding callback error: %s", cb_err)
                 elapsed = time.monotonic() - t0
                 logger.debug(
                     "DualEmbedding computed in %.2fs  alpha=%.2f",

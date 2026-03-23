@@ -34,6 +34,7 @@ runtime:
   brightness_floor: 0.003   # distances below this are treated as full brightness
   brightness_power: 2.0     # power applied after exp; >1 = steep falloff, try 2-4
   brightness_fade_seconds: 1.0
+  brightness_min: 0.15       # floor brightness — keeps covers visible even with poor match
 
   # AGC (macOS only — adjusts system input volume to keep RMS near target)
   agc_enabled: true
@@ -45,3 +46,11 @@ runtime:
   display_fps: 30
   display_mode: "sim"   # "sim" or "hub75"
   sim_scale: 22         # pixels per LED in sim mode (22 → 704px window, ~7.5" at 96dpi)
+
+  # Map display broadcast (set to 0 to disable; run_map.py listens on this port)
+  map_broadcast_port: 57001
+
+umap:
+  n_neighbors: 15       # UMAP neighborhood size — larger = more global structure
+  min_dist: 0.1         # minimum distance between points — smaller = tighter clusters
+  metric: cosine        # cosine or euclidean (cosine matches CLAP's contrastive objective)

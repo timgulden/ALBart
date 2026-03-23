@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import argparse
 import logging
+import pickle
 import queue
+import socket
 import sys
 import threading
 
@@ -124,6 +126,22 @@ def main() -> None:
     if "error" in model_store:
         raise RuntimeError("CLAP model failed to load") from model_store["error"]
 
+    # --- UDP broadcast to map display process (no-op if port not configured) ---
+    map_port = rt.get("map_broadcast_port", 0)
+    map_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    def _broadcast_map(raw, norm, top1_id: str, d_min_raw: float) -> None:
+        if not map_port:
+            return
+        try:
+            data = pickle.dumps({
+                "raw": raw, "norm": norm,
+                "top1": top1_id, "d_min_raw": d_min_raw,
+            })
+            map_sock.sendto(data, ("127.0.0.1", map_port))
+        except Exception as e:
+            logger.debug("Map broadcast error: %s", e)
+
     # --- Runtime components ---
     embedding_queue: queue.Queue = queue.Queue()
 
@@ -147,6 +165,7 @@ def main() -> None:
         lookup=lookup,
         embedding_queue=embedding_queue,
         config=config,
+        map_broadcast=_broadcast_map,
     )
 
     try:
@@ -158,6 +177,7 @@ def main() -> None:
         agc.stop()
         audio_buffer.stop()
         display.close()
+        map_sock.close()
 
 
 if __name__ == "__main__":
