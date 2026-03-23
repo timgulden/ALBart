@@ -1,4 +1,7 @@
-"""Runtime CLAP embedder: loads model once, runs in a background thread."""
+"""Runtime CLAP embedder: loads model once, runs in a background thread.
+
+Produces DualEmbedding pairs (raw + norm) that feed DualTrackLookup.
+"""
 
 from __future__ import annotations
 
@@ -6,6 +9,7 @@ import logging
 import queue
 import threading
 import time
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -15,11 +19,27 @@ from albart.runtime.audio import AudioBuffer
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class DualEmbedding:
+    """A pair of CLAP embeddings for the same audio at two normalization levels."""
+    raw:  np.ndarray   # (512,) float32 — no RMS normalization
+    norm: np.ndarray   # (512,) float32 — RMS-normalized to norm_target
+
+
+def _avg_normalize(embs: list[np.ndarray]) -> np.ndarray:
+    """Average a list of unit vectors and renormalize (mean of unit vecs ≠ unit vec)."""
+    avg = np.mean(embs, axis=0).astype(np.float32)
+    return (avg / (np.linalg.norm(avg) + 1e-8)).astype(np.float32)
+
+
 class EmbeddingWorker:
     """
     Background thread that periodically reads the audio buffer,
-    computes a CLAP embedding, and posts it to a result queue.
+    computes a DualEmbedding, and posts it to a result queue.
     """
+
+    CHUNK_SAMPLES = 10 * SAMPLE_RATE   # 10s per chunk
+    N_CHUNKS = 3                        # embed 3 chunks from the 30s buffer, then average
 
     def __init__(
         self,
@@ -27,6 +47,8 @@ class EmbeddingWorker:
         result_queue: queue.Queue,
         interval_seconds: float = 10.0,
         alpha: float = 1.0,
+        norm_target_raw: float = 0.0,
+        norm_target_norm: float = 0.12,
         model=None,
         processor=None,
         device: str | None = None,
@@ -34,8 +56,11 @@ class EmbeddingWorker:
         self.audio_buffer = audio_buffer
         self.result_queue = result_queue
         self.interval = interval_seconds
-        self.alpha = alpha  # EMA weight for current embedding; 1.0 = no averaging
-        self._ema: np.ndarray | None = None
+        self.alpha = alpha
+        self.norm_target_raw  = norm_target_raw
+        self.norm_target_norm = norm_target_norm
+        self._ema_raw:  np.ndarray | None = None
+        self._ema_norm: np.ndarray | None = None
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -56,9 +81,6 @@ class EmbeddingWorker:
         if self._thread is not None:
             self._thread.join(timeout=5.0)
 
-    CHUNK_SAMPLES = 10 * SAMPLE_RATE   # 10s per chunk (processor max_length_s for unfused models)
-    N_CHUNKS = 3                        # embed 3 chunks from the 30s buffer, then average
-
     def _run(self) -> None:
         logger.info("EmbeddingWorker started (interval=%.1fs)", self.interval)
         while not self._stop_event.is_set():
@@ -72,32 +94,44 @@ class EmbeddingWorker:
                 else:
                     audio = audio[-total:]
 
-                # Embed 3 × 10s chunks and average — mirrors how the index is built
-                chunk_embs = []
+                # Embed 3 × 10s chunks at both normalization levels
+                chunk_embs_raw  = []
+                chunk_embs_norm = []
                 for i in range(self.N_CHUNKS):
                     chunk = audio[i * self.CHUNK_SAMPLES:(i + 1) * self.CHUNK_SAMPLES]
-                    chunk_embs.append(embed_audio(chunk, self.model, self.processor, self.device))
-                avg = np.mean(chunk_embs, axis=0).astype(np.float32)
-                # Renormalize: mean of unit vectors is not a unit vector.
-                avg_norm = np.linalg.norm(avg)
-                embedding = (avg / (avg_norm + 1e-8)).astype(np.float32)
-                if self._ema is None or self.alpha >= 1.0:
-                    self._ema = embedding
+                    chunk_embs_raw.append(
+                        embed_audio(chunk, self.model, self.processor, self.device,
+                                    norm_target=self.norm_target_raw)
+                    )
+                    chunk_embs_norm.append(
+                        embed_audio(chunk, self.model, self.processor, self.device,
+                                    norm_target=self.norm_target_norm)
+                    )
+
+                emb_raw  = _avg_normalize(chunk_embs_raw)
+                emb_norm = _avg_normalize(chunk_embs_norm)
+
+                # EMA smoothing (independent for each path)
+                if self._ema_raw is None or self.alpha >= 1.0:
+                    self._ema_raw  = emb_raw
+                    self._ema_norm = emb_norm
                 else:
-                    raw_ema = self.alpha * embedding + (1.0 - self.alpha) * self._ema
-                    ema_norm = np.linalg.norm(raw_ema)
-                    self._ema = (raw_ema / (ema_norm + 1e-8)).astype(np.float32)
-                self.result_queue.put(self._ema.copy())
+                    raw_ema  = self.alpha * emb_raw  + (1.0 - self.alpha) * self._ema_raw
+                    norm_ema = self.alpha * emb_norm + (1.0 - self.alpha) * self._ema_norm
+                    self._ema_raw  = (raw_ema  / (np.linalg.norm(raw_ema)  + 1e-8)).astype(np.float32)
+                    self._ema_norm = (norm_ema / (np.linalg.norm(norm_ema) + 1e-8)).astype(np.float32)
+
+                self.result_queue.put(
+                    DualEmbedding(raw=self._ema_raw.copy(), norm=self._ema_norm.copy())
+                )
                 elapsed = time.monotonic() - t0
                 logger.debug(
-                    "Embedding computed in %.2fs  alpha=%.2f  ema=%s",
-                    elapsed, self.alpha, "fresh" if self.alpha >= 1.0 else "blended",
+                    "DualEmbedding computed in %.2fs  alpha=%.2f",
+                    elapsed, self.alpha,
                 )
             except Exception as e:
                 logger.error("Embedding error: %s", e)
 
-            # Sleep for the remainder of the interval.
-            # interval=0 means continuous: recompute immediately after finishing.
             sleep_time = self.interval - (time.monotonic() - t0)
             if sleep_time > 0:
                 self._stop_event.wait(timeout=sleep_time)

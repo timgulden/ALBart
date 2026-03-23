@@ -142,7 +142,11 @@ def run(force: bool = False, skip_spotify: bool = False) -> None:
     CHUNK_SAMPLES = 10 * 48000  # 10s at 48kHz (processor max_length_s for unfused models)
     N_CHUNKS = 3                 # embed 3 chunks, average into one vector per track
 
-    new_embeddings = []
+    # Dual-index normalization target (read from config with sensible default)
+    norm_target = float(config.get("pipeline", {}).get("norm_target", 0.12))
+
+    new_embeddings_raw  = []
+    new_embeddings_norm = []
     new_ids = []
 
     for row in tqdm(embeddable, desc="Embedding"):
@@ -151,8 +155,10 @@ def run(force: bool = False, skip_spotify: bool = False) -> None:
 
         try:
             audio, _ = librosa.load(str(preview_path), sr=48000, mono=True, dtype="float32")
-            # Embed N_CHUNKS × 10s windows and average — one representative vector per track
-            chunk_embs = []
+            # Embed N_CHUNKS × 10s windows at both raw and norm targets in one pass.
+            # Average and renormalize (mean of unit vectors is not a unit vector).
+            chunk_embs_raw  = []
+            chunk_embs_norm = []
             for i in range(N_CHUNKS):
                 start = i * CHUNK_SAMPLES
                 chunk = audio[start:start + CHUNK_SAMPLES]
@@ -160,13 +166,19 @@ def run(force: bool = False, skip_spotify: bool = False) -> None:
                     break
                 if len(chunk) < CHUNK_SAMPLES:
                     chunk = np.pad(chunk, (0, CHUNK_SAMPLES - len(chunk)))
-                chunk_embs.append(embedder.embed_audio(chunk, model, processor, device))
-            emb = np.mean(chunk_embs, axis=0).astype(np.float32)
-            # Renormalize: mean of unit vectors is not a unit vector;
-            # FlatL2 on unit vectors == cosine distance.
-            emb_norm = np.linalg.norm(emb)
-            emb = (emb / (emb_norm + 1e-8)).astype(np.float32)
-            new_embeddings.append(emb)
+                chunk_embs_raw.append(
+                    embedder.embed_audio(chunk, model, processor, device, norm_target=0.0)
+                )
+                chunk_embs_norm.append(
+                    embedder.embed_audio(chunk, model, processor, device, norm_target=norm_target)
+                )
+
+            def _avg_norm(embs):
+                avg = np.mean(embs, axis=0).astype(np.float32)
+                return (avg / (np.linalg.norm(avg) + 1e-8)).astype(np.float32)
+
+            new_embeddings_raw.append(_avg_norm(chunk_embs_raw))
+            new_embeddings_norm.append(_avg_norm(chunk_embs_norm))
             new_ids.append(track_id)
             with conn:
                 database.update_embedding_status(conn, track_id, "ok")
@@ -175,29 +187,45 @@ def run(force: bool = False, skip_spotify: bool = False) -> None:
             with conn:
                 database.update_embedding_status(conn, track_id, "error")
 
-    # --- Rebuild FAISS index (merge new embeddings with previously stored ones) ---
-    EMBEDDINGS_STORE = DATA_DIR / "embeddings.npy"
-    IDS_STORE        = DATA_DIR / "faiss_ids.npy"
+    # --- Rebuild dual FAISS indices (merge new with previously stored) ---
+    RAW_EMB_STORE  = DATA_DIR / "embeddings_raw.npy"
+    NORM_EMB_STORE = DATA_DIR / "embeddings_norm.npy"
+    IDS_STORE      = DATA_DIR / "faiss_raw_ids.npy"  # both indices share the same ID set
 
-    if not force and EMBEDDINGS_STORE.exists() and IDS_STORE.exists() and new_ids:
-        prev_embeddings = np.load(str(EMBEDDINGS_STORE))
-        prev_ids = np.load(str(IDS_STORE), allow_pickle=True).tolist()
+    if not force and RAW_EMB_STORE.exists() and IDS_STORE.exists() and new_ids:
+        prev_raw  = np.load(str(RAW_EMB_STORE))
+        prev_norm = np.load(str(NORM_EMB_STORE))
+        prev_ids  = np.load(str(IDS_STORE), allow_pickle=True).tolist()
         new_id_set = set(new_ids)
         keep = [i for i, tid in enumerate(prev_ids) if tid not in new_id_set]
-        all_embeddings = np.concatenate(
-            [prev_embeddings[keep], np.stack(new_embeddings)], axis=0
+        all_embeddings_raw  = np.concatenate(
+            [prev_raw[keep],  np.stack(new_embeddings_raw)],  axis=0
+        ).astype(np.float32)
+        all_embeddings_norm = np.concatenate(
+            [prev_norm[keep], np.stack(new_embeddings_norm)], axis=0
         ).astype(np.float32)
         all_ids = [prev_ids[i] for i in keep] + new_ids
     elif new_ids:
-        all_embeddings = np.stack(new_embeddings).astype(np.float32)
+        all_embeddings_raw  = np.stack(new_embeddings_raw).astype(np.float32)
+        all_embeddings_norm = np.stack(new_embeddings_norm).astype(np.float32)
         all_ids = new_ids
     else:
-        all_embeddings = None
+        all_embeddings_raw = all_embeddings_norm = None
         all_ids = []
 
     if all_ids:
-        np.save(str(EMBEDDINGS_STORE), all_embeddings)
-        embedder.build_and_save_index(all_embeddings, all_ids)
+        np.save(str(RAW_EMB_STORE),  all_embeddings_raw)
+        np.save(str(NORM_EMB_STORE), all_embeddings_norm)
+        embedder.build_and_save_index(
+            all_embeddings_raw,  all_ids,
+            index_path=embedder.FAISS_RAW_INDEX_PATH,
+            ids_path=embedder.FAISS_RAW_IDS_PATH,
+        )
+        embedder.build_and_save_index(
+            all_embeddings_norm, all_ids,
+            index_path=embedder.FAISS_NORM_INDEX_PATH,
+            ids_path=embedder.FAISS_NORM_IDS_PATH,
+        )
         print(f"FAISS index built with {len(all_ids)} tracks.")
 
     # --- Summary ---

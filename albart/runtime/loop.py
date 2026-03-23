@@ -10,7 +10,8 @@ import numpy as np
 
 from albart.pipeline.preprocess import load_art_32
 from albart.runtime.display import DisplayBackend
-from albart.runtime.lookup import AliasTable, TrackLookup
+from albart.runtime.embedder import DualEmbedding
+from albart.runtime.lookup import AliasTable, DualTrackLookup
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +49,7 @@ class DisplayLoop:
     def __init__(
         self,
         display: DisplayBackend,
-        lookup: TrackLookup,
+        lookup: DualTrackLookup,
         embedding_queue: queue.Queue,
         config: dict,
     ) -> None:
@@ -58,9 +59,14 @@ class DisplayLoop:
 
         rt = config["runtime"]
         self.fps = rt["display_fps"]
-        self.softmax_k = rt["softmax_k"]
+        self.rank_fusion_k = rt.get("rank_fusion_k", 60)
+        self.sampling_rank_decay = rt.get("sampling_rank_decay", 0.7)
         self.dwell_k = rt["dwell_k"]
+        self.dwell_floor = rt["dwell_floor"]
         self.brightness_k = rt["brightness_k"]
+        self.brightness_floor = rt["brightness_floor"]
+        self.brightness_power = rt["brightness_power"]
+        self.sampling_top_n = rt["sampling_top_n"]
         self.min_dwell = rt["min_dwell_seconds"]
         self.max_dwell = rt["max_dwell_seconds"]
         self.crossfade_seconds = rt["crossfade_seconds"]
@@ -86,6 +92,10 @@ class DisplayLoop:
 
         # Art cache: track_id → (32,32,3) uint8 array
         self._art_cache: dict[str, np.ndarray] = {}
+        # Label cache: track_id → (title, artist)
+        self._label_cache: dict[str, tuple[str, str]] = {}
+        # Label to apply when the current crossfade completes
+        self._pending_label: tuple[str, str] | None = None
 
     # ── Public ────────────────────────────────────────────────────────────
 
@@ -104,8 +114,8 @@ class DisplayLoop:
     # ── Embedding / table updates ─────────────────────────────────────────
 
     def _check_embedding_queue(self) -> None:
-        """Drain queue, build alias table from latest embedding."""
-        latest = None
+        """Drain queue, build alias table from latest DualEmbedding."""
+        latest: DualEmbedding | None = None
         try:
             while True:
                 latest = self.embedding_queue.get_nowait()
@@ -116,10 +126,16 @@ class DisplayLoop:
             return
 
         table = self.lookup.query(
-            latest,
-            softmax_k=self.softmax_k,
+            emb_raw=latest.raw,
+            emb_norm=latest.norm,
+            rank_fusion_k=self.rank_fusion_k,
+            sampling_top_n=self.sampling_top_n,
+            sampling_rank_decay=self.sampling_rank_decay,
             dwell_k=self.dwell_k,
+            dwell_floor=self.dwell_floor,
             brightness_k=self.brightness_k,
+            brightness_floor=self.brightness_floor,
+            brightness_power=self.brightness_power,
             min_dwell=self.min_dwell,
             max_dwell=self.max_dwell,
         )
@@ -177,6 +193,9 @@ class DisplayLoop:
             self._next_frame = None
             self._in_crossfade = False
             self._crossfade_elapsed = 0.0
+            if self._pending_label is not None:
+                self.display.set_current_track(*self._pending_label)
+                self._pending_label = None
 
     def _tick_dwell(self, dt: float) -> None:
         self.display.show_frame(apply_brightness(self._current_frame, self._brightness))
@@ -196,16 +215,23 @@ class DisplayLoop:
             self._table = self._pending_table
             self._pending_table = None
 
-        track_id, dwell = self._table.sample()
+        # Always show the top-ranked track.  The embedding updates every
+        # ~1s via EMA, so the display shifts naturally as audio changes —
+        # no alias sampling needed to provide variety.
+        track_id = self._table.track_ids[0]
+        dwell = self._table.dwell_times[0]
         self._dwell_remaining = dwell
         next_frame = self._load_frame(track_id)
+        label = self._label_cache.get(track_id, ("", ""))
 
         if self._current_frame is None:
             # Bootstrap: show first frame immediately, no crossfade
             self._current_frame = next_frame
+            self.display.set_current_track(*label)
             logger.debug("Bootstrap: first cover %s (dwell=%.1fs)", track_id, dwell)
         else:
             self._next_frame = next_frame
+            self._pending_label = label
             self._in_crossfade = True
             self._crossfade_elapsed = 0.0
             logger.debug("Next cover: %s (dwell=%.1fs)", track_id, dwell)
@@ -219,12 +245,13 @@ class DisplayLoop:
         from albart.pipeline.database import DB_PATH, get_connection
         conn = get_connection(DB_PATH)
         row = conn.execute(
-            "SELECT art_path_32 FROM tracks WHERE track_id = ?", (track_id,)
+            "SELECT art_path_32, title, artist FROM tracks WHERE track_id = ?", (track_id,)
         ).fetchone()
         conn.close()
 
         if row and row["art_path_32"]:
             try:
+                self._label_cache[track_id] = (row["title"] or "", row["artist"] or "")
                 frame = load_art_32(row["art_path_32"])
                 self._art_cache[track_id] = frame
                 return frame

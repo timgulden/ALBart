@@ -18,6 +18,10 @@ class DisplayBackend:
         """
         raise NotImplementedError
 
+    def set_current_track(self, title: str, artist: str) -> None:
+        """Notify the backend of the currently displayed track (sim only)."""
+        pass
+
     def close(self) -> None:
         """Release display resources."""
         pass

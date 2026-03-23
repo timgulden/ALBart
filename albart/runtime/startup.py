@@ -23,7 +23,7 @@ def _ripple_frame(t: float, brightness_scale: float = 1.0) -> np.ndarray:
     """Return a (32, 32, 3) uint8 ripple frame at time t."""
     wave = np.cos(_R * RIPPLE_FREQ - t * RIPPLE_SPEED)
     intensity = np.clip(wave * _ENVELOPE, 0.0, 1.0) * brightness_scale
-    rgb = (intensity[:, :, np.newaxis] * 255).astype(np.uint8)
+    rgb = np.repeat((intensity[:, :, np.newaxis] * 255).astype(np.uint8), 3, axis=2)
     # Tint slightly cool (blue-white) to feel like a waking LED panel
     rgb[:, :, 2] = np.clip(rgb[:, :, 2].astype(np.int16) + 20, 0, 255).astype(np.uint8)
     return rgb

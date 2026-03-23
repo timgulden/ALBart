@@ -24,8 +24,15 @@ class AudioBuffer:
         self.n_samples = int(buffer_length_seconds * SAMPLE_RATE)
         self._buffer = np.zeros(self.n_samples, dtype=np.float32)
         self._write_pos = 0
+        self._samples_captured = 0
         self._lock = threading.Lock()
         self._stream: sd.InputStream | None = None
+
+    @property
+    def buffer_full(self) -> bool:
+        """True once at least buffer_length_seconds of real audio has been captured."""
+        with self._lock:
+            return self._samples_captured >= self.n_samples
 
     def _callback(self, indata: np.ndarray, frames: int, time, status) -> None:
         if status:
@@ -41,14 +48,16 @@ class AudioBuffer:
                 self._buffer[self._write_pos:] = mono[:first]
                 self._buffer[: n - first] = mono[first:]
             self._write_pos = end % self.n_samples
+            self._samples_captured += n
 
-    def start(self) -> None:
+    def start(self, device=None) -> None:
         """Open and start the audio input stream."""
         self._stream = sd.InputStream(
             samplerate=SAMPLE_RATE,
             channels=1,
             dtype="float32",
             callback=self._callback,
+            device=device,
         )
         self._stream.start()
         logger.info(

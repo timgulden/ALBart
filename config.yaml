@@ -6,6 +6,7 @@
 
 pipeline:
   art_source_size: 300      # pixel width of source art to request from Spotify
+  norm_target: 0.12         # RMS normalization target for the norm FAISS index path
 
 runtime:
   # Embedding
@@ -13,11 +14,14 @@ runtime:
   buffer_length_seconds: 30
   embedding_alpha: 0.5            # EMA weight for current embedding; 1.0 = no averaging
 
-  # Sampling
-  # NOTE: larger_clap_music (normalized) distances are ~0.002–0.010 (vs ~0.05–0.15
-  # for the old unfused tiny model). All k/floor params scaled ~15× accordingly.
-  sampling_top_n: 5     # sample from top-N candidates probabilistically
-  softmax_k: 500.0      # weight sharpness; higher = best match dominates more
+  # Dual-index rank fusion
+  norm_target_raw: 0.0    # RMS norm for raw embedding path (0 = no normalization)
+  norm_target_norm: 0.12  # RMS norm for norm embedding path
+  rank_fusion_k: 60       # RRF constant — higher = flatter rank differentiation
+
+  # Sampling (dual-index uses geometric rank decay, not softmax over distances)
+  sampling_top_n: 20    # sample from top-N fused candidates
+  sampling_rank_decay: 0.85  # weight decay per rank step (rank 1=1.0, rank 2=0.85, …)
 
   # Dwell time (absolute, per-track)
   dwell_k: 250.0        # decay rate above floor; higher = steeper falloff
@@ -30,6 +34,11 @@ runtime:
   brightness_floor: 0.003   # distances below this are treated as full brightness
   brightness_power: 2.0     # power applied after exp; >1 = steep falloff, try 2-4
   brightness_fade_seconds: 1.0
+
+  # AGC (macOS only — adjusts system input volume to keep RMS near target)
+  agc_enabled: true
+  agc_target_rms: 0.20       # target RMS for audio buffer; match recording conditions
+  agc_interval_seconds: 10.0 # how often to check and adjust (seconds)
 
   # Display
   crossfade_seconds: 1.0
