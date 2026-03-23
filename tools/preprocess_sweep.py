@@ -1,7 +1,7 @@
 """
 tools/preprocess_sweep.py
 
-Phase-1 preprocessing strategy sweep for laion/larger_clap_music.
+Preprocessing strategy sweep for laion/clap-htsat-unfused.
 
 For each strategy, builds a FlatL2 FAISS index from all preview files
 (up to 3 × 10s chunks per preview, stored as individual vectors) and
@@ -11,8 +11,13 @@ non-overlapping 10s windows.
 Both index (preview) and query (recording) audio are preprocessed with
 the same strategy — ensuring the embedding space stays consistent.
 
+Note: embed_audio() in production always applies preprocess_audio()
+internally for clap-htsat-unfused (hidden_size=768).  This sweep
+bypasses that via a direct processor call so strategies can be tested
+independently.  "hard_limit" corresponds to the production code path.
+
 Usage:
-    # Sequential (~1 hour)
+    # Sequential
     python tools/preprocess_sweep.py
 
     # Parallel — all 8 strategies simultaneously (~8 min on 14-core Mac)
@@ -47,8 +52,9 @@ CHUNK_SAMPLES = 10 * SAMPLE_RATE   # 10s per chunk
 N_CHUNKS      = 3                   # max chunks taken per preview
 
 # PyTorch threads per worker in parallel mode.
-# 14 cores / 8 workers = 1.75 → 2 gives good utilization without over-subscription.
-THREADS_PER_WORKER = 2
+# In practice each worker uses ~1.24 cores (Accelerate handles its own threading),
+# so 1 CPU reserved per worker lets all 8 run simultaneously on a 14-core machine.
+THREADS_PER_WORKER = 1
 
 
 # ── Preprocessing strategies ──────────────────────────────────────────────────
@@ -183,14 +189,17 @@ def evaluate_sample(
 
 def _ray_worker(
     strategy_name: str,
-    track_tuples: list,        # [(track_id, preview_path_str), ...]
+    audio_store: dict,         # {track_id: int16 array} — pre-loaded, shared via object store
+    track_ids: list,           # ordered list of track_ids to embed
     sample_tuples: list,       # [(stem, [target_id, ...], audio_array), ...]
-    data_dir_str: str,
     n_threads: int,
 ) -> dict:
     """
     Run one preprocessing strategy end-to-end in an isolated process:
-    build index from all previews, evaluate all samples, return results dict.
+    build index from pre-loaded audio, evaluate all samples, return results dict.
+
+    Audio is received as int16 arrays from Ray's shared object store (zero-copy),
+    converted to float32 per track — no disk I/O during the compute phase.
 
     Self-contained: all imports and strategy definitions are local so this
     function serializes cleanly across Ray worker processes.
@@ -200,7 +209,6 @@ def _ray_worker(
     sys.path.insert(0, str(Path(__file__).parent.parent))
 
     import numpy as np
-    import librosa
     import scipy.signal
     import torch
     import faiss
@@ -208,6 +216,8 @@ def _ray_worker(
     from albart.utils import compress_and_normalize, preprocess_audio
 
     torch.set_num_threads(n_threads)
+    chunk_samples = 10 * SAMPLE_RATE
+    n_chunks_max = 3
 
     # Reconstruct strategy functions locally (lambdas aren't picklable)
     def _rms_local(a, target=0.1):
@@ -229,9 +239,6 @@ def _ray_worker(
         "hard_limit":     lambda a: preprocess_audio(a, sr=SAMPLE_RATE),
     }
     fn = _strats[strategy_name]
-    chunk_samples = 10 * SAMPLE_RATE
-    n_chunks_max = 3
-    data_dir = Path(data_dir_str)
 
     def _embed_local(audio):
         inputs = processor(audio=audio, sampling_rate=SAMPLE_RATE, return_tensors="pt")
@@ -244,18 +251,16 @@ def _ray_worker(
         return vec / (norm + 1e-8)
 
     print(f"[{strategy_name}] Loading CLAP model...", flush=True)
-    model, processor, device = load_model()
+    model, processor, device = load_model(allow_mps=True)
 
-    # Build index
-    print(f"[{strategy_name}] Building index from {len(track_tuples)} previews...", flush=True)
+    # Build index from pre-loaded audio (no disk I/O)
+    print(f"[{strategy_name}] Building index from {len(track_ids)} previews...", flush=True)
     embs, ids = [], []
-    for i, (track_id, preview_path_str) in enumerate(track_tuples):
-        try:
-            audio, _ = librosa.load(
-                str(data_dir / preview_path_str), sr=SAMPLE_RATE, mono=True, dtype="float32"
-            )
-        except Exception:
+    for i, track_id in enumerate(track_ids):
+        audio_i16 = audio_store.get(track_id)
+        if audio_i16 is None:
             continue
+        audio = audio_i16.astype(np.float32) / 32767.0
         n_ch = min(n_chunks_max, len(audio) // chunk_samples)
         for c in range(n_ch):
             chunk = audio[c * chunk_samples:(c + 1) * chunk_samples].astype(np.float32)
@@ -264,7 +269,7 @@ def _ray_worker(
             embs.append(_embed_local(fn(chunk)))
             ids.append(track_id)
         if (i + 1) % 500 == 0:
-            print(f"[{strategy_name}] {i + 1}/{len(track_tuples)} previews", flush=True)
+            print(f"[{strategy_name}] {i + 1}/{len(track_ids)} previews", flush=True)
 
     index = faiss.IndexFlatL2(EMBEDDING_DIM)
     index.add(np.array(embs, dtype=np.float32))
@@ -448,25 +453,48 @@ def main() -> None:
     if args.parallel:
         import ray
 
-        # Serialize samples: sets aren't an issue for Ray but lists are cleaner
+        # Pre-load all preview audio as int16 in the main process.
+        # Workers receive a zero-copy view from Ray's shared object store —
+        # no disk I/O during the compute phase, eliminating SSD contention.
+        print(f"\nPre-loading {len(track_tuples)} previews into shared memory (int16)...")
+        audio_store: dict[str, np.ndarray] = {}
+        n_load_errors = 0
+        for track_id, preview_path in tqdm(track_tuples, desc="Loading audio", unit="track"):
+            try:
+                audio, _ = librosa.load(
+                    str(DATA_DIR / preview_path), sr=SAMPLE_RATE, mono=True, dtype="float32"
+                )
+                audio_store[track_id] = (audio * 32767).clip(-32768, 32767).astype(np.int16)
+            except Exception:
+                n_load_errors += 1
+        total_mb = sum(a.nbytes for a in audio_store.values()) / 1024 ** 2
+        print(f"  {len(audio_store)} tracks loaded  ({total_mb:.0f} MB)"
+              + (f"  ({n_load_errors} errors)" if n_load_errors else ""))
+
+        # Ordered list of track_ids that loaded successfully
+        loaded_track_ids = [t for t, _ in track_tuples if t in audio_store]
+
+        # Serialize samples: sets → lists for Ray serialization
         sample_tuples = [(stem, list(tids), audio)
                          for stem, tids, audio in samples]
 
         ray.init()
         try:
-            # Put large shared data in the object store once
-            track_ref  = ray.put(track_tuples)
-            sample_ref = ray.put(sample_tuples)
+            # Put shared data in the object store once; all workers get
+            # a zero-copy memory-mapped reference.
+            audio_ref      = ray.put(audio_store)
+            track_ids_ref  = ray.put(loaded_track_ids)
+            sample_ref     = ray.put(sample_tuples)
 
             # Wrap _ray_worker as a Ray remote function here to avoid
             # module-level decoration interfering with sequential mode
             remote_fn = ray.remote(num_cpus=THREADS_PER_WORKER)(_ray_worker)
 
             print(f"\nLaunching {len(strat_names)} Ray workers "
-                  f"({THREADS_PER_WORKER} CPU each)...")
+                  f"({THREADS_PER_WORKER} CPU each, no disk I/O)...")
             futures = {
                 name: remote_fn.remote(
-                    name, track_ref, sample_ref, str(DATA_DIR), THREADS_PER_WORKER
+                    name, audio_ref, track_ids_ref, sample_ref, THREADS_PER_WORKER
                 )
                 for name in strat_names
             }
@@ -497,7 +525,7 @@ def main() -> None:
         print(f"  {n_total_embs:,} total embeddings, ~{est_min} min estimated")
 
         print("\nLoading CLAP model...")
-        model, processor, device = load_model()
+        model, processor, device = load_model(allow_mps=True)
         print(f"  Loaded on {device}")
 
         strat_embs: dict[str, list] = {n: [] for n in strat_names}

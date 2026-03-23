@@ -17,7 +17,7 @@ from albart.utils import DATA_DIR, get_device, preprocess_audio, compress_and_no
 
 logger = logging.getLogger(__name__)
 
-MODEL_ID = "laion/larger_clap_music"
+MODEL_ID = "laion/clap-htsat-unfused"
 EMBEDDING_DIM = 512
 SAMPLE_RATE = 48000
 
@@ -32,13 +32,16 @@ FAISS_NORM_INDEX_PATH = DATA_DIR / "faiss_norm.index"
 FAISS_NORM_IDS_PATH   = DATA_DIR / "faiss_norm_ids.npy"
 
 
-def load_model(device: str | None = None):
+def load_model(allow_mps: bool = False):
     """Load CLAP model and processor. Returns (model, processor, device).
 
-    Always runs on CPU: the fused model triggers a Metal shader race when used
-    on MPS alongside pygame's Metal renderer.  CPU is also the Pi 5 target.
+    allow_mps: if True, use MPS when available (safe for pipeline / sweep tools
+               that do not run alongside pygame's Metal renderer).
+               Default False keeps CPU for the runtime display loop, where MPS
+               triggers a Metal shader race with pygame.
+               CPU is also the Pi 5 target.
     """
-    device = "cpu"
+    device = get_device() if allow_mps else "cpu"
     logger.info("Loading CLAP model %s on %s", MODEL_ID, device)
     processor = ClapProcessor.from_pretrained(MODEL_ID)
     model = ClapModel.from_pretrained(MODEL_ID).to(device)

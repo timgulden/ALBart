@@ -131,7 +131,7 @@ def run(force: bool = False, skip_spotify: bool = False) -> None:
           f"total new={deezer_found + itunes_found}")
 
     # --- Compute embeddings ---
-    model, processor, device = embedder.load_model()
+    model, processor, device = embedder.load_model(allow_mps=True)
 
     embeddable = [
         t for t in database.get_all_tracks(conn)
