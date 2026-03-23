@@ -103,6 +103,20 @@ def compress_and_normalize(
     return (compressed * (target_rms / global_rms)).astype(np.float32)
 
 
+def compress_lp4k(audio: np.ndarray, sr: int = 48000) -> np.ndarray:
+    """
+    Norm-path preprocessing for dual-index: DRC + low-pass at 4kHz.
+
+    Complements preprocess_audio (the raw path) by using dynamic range
+    compression instead of hard limiting.  Empirically the best norm-path
+    strategy for dual-index RRF fusion with clap-htsat-unfused.
+    """
+    import scipy.signal
+    audio = compress_and_normalize(audio)
+    sos = scipy.signal.butter(8, 4000, btype="low", fs=sr, output="sos")
+    return scipy.signal.sosfilt(sos, audio).astype(np.float32)
+
+
 def load_config(path: Path = CONFIG_PATH) -> dict:
     """Load and return the config.yaml as a dict."""
     with open(path, "r") as f:

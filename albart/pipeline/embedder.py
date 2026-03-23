@@ -13,7 +13,7 @@ from transformers import ClapModel, ClapProcessor
 # Importing it at module level causes a BLAS conflict with the fused CLAP
 # model's mel-spectrogram processor on macOS, producing a segfault.
 
-from albart.utils import DATA_DIR, get_device, preprocess_audio, compress_and_normalize
+from albart.utils import DATA_DIR, get_device, preprocess_audio, compress_and_normalize, compress_lp4k
 
 logger = logging.getLogger(__name__)
 
@@ -72,8 +72,15 @@ def embed_audio(
     hidden = getattr(model.config.audio_config, "hidden_size", 768)
     if not fusion:
         if hidden <= 768:
-            # Tiny unfused model: full preprocessing (RMS + hard limit + LP)
-            audio = preprocess_audio(audio, sr=SAMPLE_RATE)
+            if norm_target > 0:
+                # Norm path: DRC + LP4k — empirically the best complement to
+                # the raw (hard_limit) path for dual-index RRF fusion.
+                # norm_target is used as a boolean flag only; any value > 0
+                # activates this path regardless of the specific value.
+                audio = compress_lp4k(audio, sr=SAMPLE_RATE)
+            else:
+                # Raw path: full preprocessing (RMS → 0.1, hard limit, LP4k)
+                audio = preprocess_audio(audio, sr=SAMPLE_RATE)
         else:
             # Larger music model: optional RMS normalization.
             if norm_target > 0:

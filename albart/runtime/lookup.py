@@ -4,14 +4,13 @@ Dual-index rank fusion strategy
 --------------------------------
 The system maintains two FAISS indices built from the same set of track previews:
 
-  raw  — previews embedded with no RMS normalization.
-         Matches recordings at a similar level to the original preview.
-         Best for: most tracks at natural listening volume (rrh_movo: 97% top-10).
+  raw  — previews embedded via preprocess_audio (RMS→0.1, hard limit, LP4k).
+         Best for: most tracks at natural listening volume.
 
-  norm — previews embedded after RMS-normalizing to ``norm_target`` (default 0.12).
-         Blurs the mel-spectrogram, more robust to room acoustics for recordings
-         captured at high or inconsistent volume.
-         Best for: BTS Dynamite and similar high-energy loud tracks (73% top-10).
+  norm — previews embedded via compress_lp4k (DRC + LP4k).
+         Softer than hard limiting; complements the raw path by handling
+         tracks with wide dynamic range or recordings at inconsistent levels.
+         Best combination determined by preprocess_sweep: hard+comp+lp4k.
 
 At query time the recording is embedded BOTH ways and each embedding queries
 its matching index.  Results are merged with Reciprocal Rank Fusion (RRF):
