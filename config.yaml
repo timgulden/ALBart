@@ -53,6 +53,17 @@ runtime:
   # Map display broadcast (set to 0 to disable; run_map.py listens on this port)
   map_broadcast_port: 57001
 
+neighborhood:
+  k: 100                       # nearest neighbors used for PCA basis
+  base_thumb_px: 80            # thumbnail size at foreground (z=0)
+  focal_length: 2.0            # perspective focal; smaller = more dramatic depth effect
+  z_near: 0.5                  # minimum z offset (prevents division issues)
+  zoom: 5.0                    # zoom level; higher = fewer tracks visible (tune to taste)
+  lerp_speed: 0.8              # position lerp speed (lower = slower, more contemplative)
+  recompute_threshold: 0.15    # L2 distance from last projection embedding to count as "far"
+  recompute_consecutive: 3     # how many consecutive "far" embeddings before reprojecting
+  sphere_base_radius: 50       # sphere radius in pixels
+
 umap:
   n_neighbors: 15       # UMAP neighborhood size — larger = more global structure
   min_dist: 0.1         # minimum distance between points — smaller = tighter clusters
