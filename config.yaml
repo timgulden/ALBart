@@ -10,7 +10,7 @@ pipeline:
 
 runtime:
   # Embedding
-  embedding_interval_seconds: 10  # seconds between embeddings
+  embedding_interval_seconds: 1   # seconds between embeddings (main engine needs fast response)
   buffer_length_seconds: 30
   embedding_alpha: 0.5            # EMA weight for current embedding; 1.0 = no averaging
 

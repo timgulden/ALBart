@@ -159,6 +159,7 @@ class NeighborhoodDisplay:
         # ── Thumbnail surface cache ──────────────────────────────────────
         self._thumb_cache: dict[tuple[str, int], pygame.Surface] = {}
 
+
         # ── MDS / Nyström state (set on recompute, fixed between) ────────
         self._landmarks:     Optional[np.ndarray] = None
         self._lm_norms_sq:   Optional[np.ndarray] = None
@@ -482,6 +483,7 @@ class NeighborhoodDisplay:
         self._all_proj_mds = all_mds.astype(np.float32)
         self._all_proj     = new_all_proj
 
+
         if self._all_proj_smooth is None:
             self._all_proj_smooth = new_all_proj.copy()
 
@@ -549,6 +551,7 @@ class NeighborhoodDisplay:
             dirs = rel_mds / np.maximum(mds_r, 1e-8)
             L2_shifted = self._compute_L2_shifted(emb_clean)
             self._all_proj = (dirs * L2_shifted[:, None]).astype(np.float32)
+
 
     # ── Per-frame tick ───────────────────────────────────────────────────
 
@@ -665,6 +668,38 @@ class NeighborhoodDisplay:
         self._draw_tooltip()
 
         pygame.display.flip()
+
+    def _draw_cluster_labels(self) -> None:
+        """Draw 3D-projected text labels for K-means clusters."""
+        if not self._cluster_labels or len(self._cluster_pos_3d) == 0:
+            return
+
+        # Cache label font (one size — perspective handled via alpha only)
+        if not hasattr(self, "_label_font"):
+            self._label_font = pygame.font.SysFont("Arial", 14)
+
+        for ci, label in enumerate(self._cluster_labels):
+            if not label:
+                continue
+            pos = self._cluster_pos_3d[ci]
+            abs_z = abs(float(pos[2]))
+            depth = abs_z + self._z_near
+            scale = self._focal_length / (depth + self._focal_length)
+            lx = int(self._cx + pos[0] * scale * self._ppu)
+            ly = int(self._cy + pos[1] * scale * self._ppu)
+
+            # Off-screen check
+            if lx < -100 or lx > self._canvas_w + 100:
+                continue
+            if ly < -20 or ly > self._canvas_h + 20:
+                continue
+
+            # Semi-transparent text — fades with distance
+            alpha = max(30, min(200, int(220 * scale)))
+            text_surf = self._label_font.render(label, True, (200, 200, 200))
+            text_surf.set_alpha(alpha)
+            tw, th = text_surf.get_size()
+            self._screen.blit(text_surf, (lx - tw // 2, ly - th // 2))
 
     def _draw_sphere(self) -> None:
         sphere_r = max(8, int(

@@ -226,23 +226,7 @@ class DisplayLoop:
             self._table = self._pending_table
             self._pending_table = None
 
-        # Sticky top-1: keep current track unless a different track has been
-        # #1 for several consecutive tables (prevents flicker between two
-        # nearly-equal matches).
-        new_top1 = self._table.track_ids[0]
-        if self._current_track_id is None:
-            track_id = new_top1
-        elif new_top1 == self._current_track_id:
-            self._diff_count = 0
-            track_id = self._current_track_id
-        else:
-            self._diff_count += 1
-            if self._diff_count >= self._sticky_threshold:
-                track_id = new_top1
-                self._diff_count = 0
-            else:
-                track_id = self._current_track_id
-
+        track_id = self._table.track_ids[0]
         dwell = self._table.dwell_times[0]
         self._current_track_id = track_id
         self._dwell_remaining = dwell
