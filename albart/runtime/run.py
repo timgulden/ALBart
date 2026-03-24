@@ -25,7 +25,7 @@ from albart.pipeline.embedder import load_model
 from albart.runtime.agc import AGCWorker
 from albart.runtime.audio import AudioBuffer
 from albart.runtime.embedder import EmbeddingWorker
-from albart.runtime.lookup import DualTrackLookup
+from albart.runtime.lookup import TrackLookup
 from albart.runtime.loop import DisplayLoop
 from albart.runtime.startup import run_startup
 from albart.utils import load_config
@@ -130,13 +130,12 @@ def main() -> None:
     map_port = rt.get("map_broadcast_port", 0)
     map_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-    def _broadcast_map(raw, norm, top1_id: str, d_min_raw: float) -> None:
+    def _broadcast_map(emb: "np.ndarray", top1_id: str, d_min_raw: float) -> None:
         if not map_port:
             return
         try:
             data = pickle.dumps({
-                "raw": raw, "norm": norm,
-                "top1": top1_id, "d_min_raw": d_min_raw,
+                "raw": emb, "top1": top1_id, "d_min_raw": d_min_raw,
             })
             map_sock.sendto(data, ("127.0.0.1", map_port))
         except Exception as e:
@@ -145,15 +144,14 @@ def main() -> None:
     # --- Runtime components ---
     embedding_queue: queue.Queue = queue.Queue()
 
-    lookup = DualTrackLookup()
+    lookup = TrackLookup()
 
     worker = EmbeddingWorker(
         audio_buffer=audio_buffer,
         result_queue=embedding_queue,
         interval_seconds=rt["embedding_interval_seconds"],
         alpha=rt.get("embedding_alpha", 1.0),
-        norm_target_raw=float(rt.get("norm_target_raw", 0.0)),
-        norm_target_norm=float(rt.get("norm_target_norm", 0.12)),
+        norm_target=float(rt.get("norm_target_raw", 0.0)),
         model=model_store["model"],
         processor=model_store["processor"],
         device=model_store["device"],

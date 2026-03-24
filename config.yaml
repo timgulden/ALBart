@@ -10,17 +10,15 @@ pipeline:
 
 runtime:
   # Embedding
-  embedding_interval_seconds: 1   # seconds between embeddings; 0 = continuous
+  embedding_interval_seconds: 10  # seconds between embeddings
   buffer_length_seconds: 30
   embedding_alpha: 0.5            # EMA weight for current embedding; 1.0 = no averaging
 
-  # Dual-index rank fusion
-  norm_target_raw: 0.0    # RMS norm for raw embedding path (0 = no normalization)
-  norm_target_norm: 0.12  # RMS norm for norm embedding path
-  rank_fusion_k: 60       # RRF constant — higher = flatter rank differentiation
+  # Single-index lookup (raw FAISS, no RMS normalization)
+  norm_target_raw: 0.0    # RMS norm for embedding path (0 = no normalization)
 
-  # Sampling (dual-index uses geometric rank decay, not softmax over distances)
-  sampling_top_n: 20    # sample from top-N fused candidates
+  # Sampling
+  sampling_top_n: 20    # top-N candidates for alias table
   sampling_rank_decay: 0.85  # weight decay per rank step (rank 1=1.0, rank 2=0.85, …)
 
   # Dwell time (absolute, per-track)
@@ -55,13 +53,13 @@ runtime:
 
 neighborhood:
   k: 100                       # nearest neighbors used for PCA basis
-  base_thumb_px: 80            # thumbnail size at foreground (z=0)
-  focal_length: 2.0            # perspective focal; smaller = more dramatic depth effect
+  base_thumb_px: 144           # thumbnail size at foreground (z=0)
+  focal_length: 0.55           # perspective focal; smaller = faster size falloff with depth
   z_near: 0.5                  # minimum z offset (prevents division issues)
   zoom: 5.0                    # zoom level; higher = fewer tracks visible (tune to taste)
-  lerp_speed: 0.8              # position lerp speed (lower = slower, more contemplative)
-  recompute_threshold: 0.15    # L2 distance from last projection embedding to count as "far"
-  recompute_consecutive: 3     # how many consecutive "far" embeddings before reprojecting
+  lerp_speed: 0.3              # position lerp speed (lower = slower, more contemplative)
+  recompute_threshold: 0.25    # L2 distance from last projection embedding to count as "far"
+  recompute_consecutive: 5     # how many consecutive "far" embeddings before reprojecting
   sphere_base_radius: 50       # sphere radius in pixels
 
 umap:

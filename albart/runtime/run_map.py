@@ -1,6 +1,6 @@
 """CLI entry point for the ALBart music map visualization.
 
-Runs as a separate process alongside the main runtime.  Receives DualEmbedding
+Runs as a separate process alongside the main runtime.  Receives embedding
 payloads via UDP from the main process and renders the music map.
 
 Usage:
@@ -139,7 +139,7 @@ def main() -> None:
 
             if latest is not None:
                 display.update(
-                    latest["raw"], latest["norm"],
+                    latest["raw"],
                     latest["top1"], latest["d_min_raw"],
                 )
 

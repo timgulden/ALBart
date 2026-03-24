@@ -10,8 +10,7 @@ import numpy as np
 
 from albart.pipeline.preprocess import load_art_32
 from albart.runtime.display import DisplayBackend
-from albart.runtime.embedder import DualEmbedding
-from albart.runtime.lookup import AliasTable, DualTrackLookup
+from albart.runtime.lookup import AliasTable, TrackLookup
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +48,7 @@ class DisplayLoop:
     def __init__(
         self,
         display: DisplayBackend,
-        lookup: DualTrackLookup,
+        lookup: TrackLookup,
         embedding_queue: queue.Queue,
         config: dict,
         map_broadcast=None,
@@ -57,12 +56,11 @@ class DisplayLoop:
         self.display = display
         self.lookup = lookup
         self.embedding_queue = embedding_queue
-        self._map_broadcast = map_broadcast  # optional callable(raw, norm, top1_id, d_min_raw)
+        self._map_broadcast = map_broadcast  # optional callable(emb, top1_id, d_min_raw)
 
         rt = config["runtime"]
         self.fps = rt["display_fps"]
-        self.rank_fusion_k = rt.get("rank_fusion_k", 60)
-        self.sampling_rank_decay = rt.get("sampling_rank_decay", 0.7)
+        self.sampling_rank_decay = rt.get("sampling_rank_decay", 0.85)
         self.dwell_k = rt["dwell_k"]
         self.dwell_floor = rt["dwell_floor"]
         self.brightness_k = rt["brightness_k"]
@@ -100,6 +98,11 @@ class DisplayLoop:
         # Label to apply when the current crossfade completes
         self._pending_label: tuple[str, str] | None = None
 
+        # Hysteresis: current displayed track + consecutive different count
+        self._current_track_id: str | None = None
+        self._diff_count: int = 0
+        self._sticky_threshold: int = 2  # must be different N times to switch
+
     # ── Public ────────────────────────────────────────────────────────────
 
     def run(self) -> None:
@@ -117,8 +120,8 @@ class DisplayLoop:
     # ── Embedding / table updates ─────────────────────────────────────────
 
     def _check_embedding_queue(self) -> None:
-        """Drain queue, build alias table from latest DualEmbedding."""
-        latest: DualEmbedding | None = None
+        """Drain queue, build alias table from latest embedding."""
+        latest: np.ndarray | None = None
         try:
             while True:
                 latest = self.embedding_queue.get_nowait()
@@ -129,9 +132,7 @@ class DisplayLoop:
             return
 
         table = self.lookup.query(
-            emb_raw=latest.raw,
-            emb_norm=latest.norm,
-            rank_fusion_k=self.rank_fusion_k,
+            embedding=latest,
             sampling_top_n=self.sampling_top_n,
             sampling_rank_decay=self.sampling_rank_decay,
             dwell_k=self.dwell_k,
@@ -143,10 +144,10 @@ class DisplayLoop:
             max_dwell=self.max_dwell,
         )
 
-        # Broadcast to map display process (top-1 from RRF fusion, same as LED)
+        # Broadcast to map display process
         if self._map_broadcast is not None and table.track_ids:
             try:
-                self._map_broadcast(latest.raw, latest.norm, table.track_ids[0], table.d_min_raw)
+                self._map_broadcast(latest, table.track_ids[0], table.d_min_raw)
             except Exception as e:
                 logger.debug("Map broadcast error: %s", e)
 
@@ -225,11 +226,25 @@ class DisplayLoop:
             self._table = self._pending_table
             self._pending_table = None
 
-        # Always show the top-ranked track.  The embedding updates every
-        # ~1s via EMA, so the display shifts naturally as audio changes —
-        # no alias sampling needed to provide variety.
-        track_id = self._table.track_ids[0]
+        # Sticky top-1: keep current track unless a different track has been
+        # #1 for several consecutive tables (prevents flicker between two
+        # nearly-equal matches).
+        new_top1 = self._table.track_ids[0]
+        if self._current_track_id is None:
+            track_id = new_top1
+        elif new_top1 == self._current_track_id:
+            self._diff_count = 0
+            track_id = self._current_track_id
+        else:
+            self._diff_count += 1
+            if self._diff_count >= self._sticky_threshold:
+                track_id = new_top1
+                self._diff_count = 0
+            else:
+                track_id = self._current_track_id
+
         dwell = self._table.dwell_times[0]
+        self._current_track_id = track_id
         self._dwell_remaining = dwell
         next_frame = self._load_frame(track_id)
         label = self._label_cache.get(track_id, ("", ""))

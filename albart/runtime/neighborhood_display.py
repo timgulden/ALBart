@@ -85,7 +85,30 @@ class NeighborhoodDisplay:
         self._N = len(self._id_list)
 
         logger.info("Loading all embeddings (%d tracks)...", self._N)
-        self._all_embeddings = np.load(str(EMBEDDINGS_RAW_PATH)).astype(np.float32)
+        all_emb = np.load(str(EMBEDDINGS_RAW_PATH)).astype(np.float32)
+
+        # Deduplicate: tracks with identical embeddings (same song on
+        # multiple albums) cause z-fighting flicker.  Keep first occurrence.
+        _, unique_idx = np.unique(
+            all_emb.view(np.uint8).reshape(all_emb.shape[0], -1),
+            axis=0, return_index=True,
+        )
+        unique_idx.sort()  # preserve original order
+        n_dupes = self._N - len(unique_idx)
+
+        # Map from original FAISS index → deduplicated index (-1 if removed)
+        self._faiss_to_dedup = np.full(len(all_emb), -1, dtype=np.int32)
+        for new_i, orig_i in enumerate(unique_idx):
+            self._faiss_to_dedup[orig_i] = new_i
+
+        if n_dupes > 0:
+            logger.info("Deduplicated %d tracks with identical embeddings "
+                        "(%d → %d)", n_dupes, len(all_emb), len(unique_idx))
+            self._id_list = [self._id_list[i] for i in unique_idx]
+            all_emb = all_emb[unique_idx]
+            self._N = len(self._id_list)
+
+        self._all_embeddings = all_emb
 
         # Pre-compute squared norms for fast L2 distance computation
         self._all_norms_sq = np.sum(
@@ -153,7 +176,7 @@ class NeighborhoodDisplay:
         self._L2_median_shift: float = 1.0
 
         # Fixed ppu (tuned for ~500 on screen at 1080p)
-        self._ppu: float = 1130.0
+        self._ppu: float = 1695.0
 
         # Hybrid positions (updated per cycle)
         self._all_proj:        Optional[np.ndarray] = None  # (N, 3) float32
@@ -351,10 +374,28 @@ class NeighborhoodDisplay:
         ).reshape(1, -1).astype(np.float32)
 
         # K nearest neighbors + L2 distances
-        dists_sq, idxs = self._faiss_index.search(q, self._neighborhood_k)
-        valid = idxs[0] >= 0
-        neighbor_idxs = idxs[0][valid]
-        L2_neighbors = np.sqrt(np.maximum(dists_sq[0][valid], 0.0))
+        # Request extra to cover dedup'd tracks, then remap to dedup indices
+        n_search = min(self._neighborhood_k + 200, self._faiss_index.ntotal)
+        dists_sq, idxs = self._faiss_index.search(q, n_search)
+
+        # Remap FAISS indices → deduplicated indices, skip removed tracks
+        neighbor_idxs_dedup = []
+        L2_neighbors_list = []
+        seen: set[int] = set()
+        for dist, idx in zip(dists_sq[0], idxs[0]):
+            if idx < 0:
+                continue
+            dedup_i = int(self._faiss_to_dedup[idx])
+            if dedup_i < 0 or dedup_i in seen:
+                continue
+            seen.add(dedup_i)
+            neighbor_idxs_dedup.append(dedup_i)
+            L2_neighbors_list.append(float(np.sqrt(max(dist, 0.0))))
+            if len(neighbor_idxs_dedup) >= self._neighborhood_k:
+                break
+
+        neighbor_idxs = np.array(neighbor_idxs_dedup, dtype=np.int64)
+        L2_neighbors = np.array(L2_neighbors_list, dtype=np.float64)
 
         # L2 shift + normalization
         self._L2_min = float(L2_neighbors[0]) if len(L2_neighbors) > 0 else 0.0
@@ -466,7 +507,6 @@ class NeighborhoodDisplay:
     def update(
         self,
         emb_raw:       np.ndarray,
-        emb_norm:      np.ndarray,  # noqa: ARG002
         top1_track_id: str,
         d_min_raw:     float,
     ) -> None:
@@ -519,8 +559,10 @@ class NeighborhoodDisplay:
                 self._all_proj - self._all_proj_smooth
             )
 
-        # Hover detection
-        if len(self._frame_vis) > 0:
+        # Hover detection (clear if mouse is outside the window)
+        if not pygame.mouse.get_focused():
+            self._hover_track_id = None
+        elif len(self._frame_vis) > 0:
             mx, my = pygame.mouse.get_pos()
             dists  = np.hypot(
                 self._frame_sx - mx, self._frame_sy - my

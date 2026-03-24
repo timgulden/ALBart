@@ -5,7 +5,7 @@ canvas.  A grey dot traces the live audio embedding (via UMAP transform).  The
 closest matching album cover is magnified near the dot and labeled.  A long
 fading trail records the recent path through music space.
 
-Designed to run as a separate process, receiving DualEmbedding payloads over
+Designed to run as a separate process, receiving embedding payloads over
 a local UDP socket from the main ALBart runtime.
 """
 
@@ -97,7 +97,7 @@ class MapDisplay:
     """
     UMAP music map visualization.
 
-    Call update(emb_raw, emb_norm) each time a new DualEmbedding arrives.
+    Call update(emb_raw, top1_track_id, d_min_raw) each time a new embedding arrives.
     Call render(dt) at display_fps to advance state and draw a frame.
     """
 
@@ -336,7 +336,6 @@ class MapDisplay:
     def update(
         self,
         emb_raw: np.ndarray,
-        emb_norm: np.ndarray,  # noqa: ARG002
         top1_track_id: str,
         d_min_raw: float,
     ) -> None:
