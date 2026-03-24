@@ -10,12 +10,12 @@ pipeline:
 
 runtime:
   # Embedding
-  embedding_interval_seconds: 1   # seconds between embeddings (main engine needs fast response)
+  embedding_interval_seconds: 10  # seconds between embeddings
   buffer_length_seconds: 30
-  embedding_alpha: 0.5            # EMA weight for current embedding; 1.0 = no averaging
+  embedding_alpha: 1.0            # EMA weight; 1.0 = no smoothing (clean digital signal)
 
-  # Single-index lookup (raw FAISS, no RMS normalization)
-  norm_target_raw: 0.0    # RMS norm for embedding path (0 = no normalization)
+  # Single-index lookup (norm FAISS, RMS-normalized to 0.12)
+  norm_target_raw: 0.12   # RMS norm applied before CLAP (matches pipeline norm path)
 
   # Sampling
   sampling_top_n: 20    # top-N candidates for alias table
@@ -58,7 +58,7 @@ neighborhood:
   z_near: 0.5                  # minimum z offset (prevents division issues)
   zoom: 5.0                    # zoom level; higher = fewer tracks visible (tune to taste)
   lerp_speed: 0.3              # position lerp speed (lower = slower, more contemplative)
-  recompute_threshold: 0.25    # L2 distance from last projection embedding to count as "far"
+  recompute_threshold: 0.50    # L2 distance from last projection embedding to count as "far"
   recompute_consecutive: 5     # how many consecutive "far" embeddings before reprojecting
   sphere_base_radius: 50       # sphere radius in pixels
 

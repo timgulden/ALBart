@@ -1,6 +1,6 @@
 """FAISS nearest-neighbor lookup, Vose alias table, dwell and brightness.
 
-Single-index strategy: queries the raw FAISS index (no RMS normalization)
+Single-index strategy: queries the norm FAISS index (RMS-normalized to 0.12)
 and ranks tracks by L2 distance.  Sampling weights are geometric over rank.
 Brightness and dwell are calibrated from the nearest-neighbor distance.
 """
@@ -12,7 +12,7 @@ import logging
 import numpy as np
 
 from albart.pipeline.embedder import (
-    FAISS_RAW_INDEX_PATH, FAISS_RAW_IDS_PATH,
+    FAISS_NORM_INDEX_PATH, FAISS_NORM_IDS_PATH,
     load_index,
 )
 
@@ -95,7 +95,7 @@ class TrackLookup:
     """Single raw FAISS index lookup → AliasTable."""
 
     def __init__(self) -> None:
-        self._index, ids = load_index(FAISS_RAW_INDEX_PATH, FAISS_RAW_IDS_PATH)
+        self._index, ids = load_index(FAISS_NORM_INDEX_PATH, FAISS_NORM_IDS_PATH)
         self._id_list = [str(t) for t in ids]
         logger.info("TrackLookup ready: %d tracks", self._index.ntotal)
 
