@@ -38,7 +38,7 @@ from spotipy.oauth2 import SpotifyOAuth
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from albart.pipeline.database import DB_PATH, get_connection
-from albart.pipeline.embedder import FAISS_RAW_INDEX_PATH, FAISS_RAW_IDS_PATH
+from albart.pipeline.embedder import FAISS_NORM_INDEX_PATH, FAISS_NORM_IDS_PATH
 from albart.utils import DATA_DIR
 
 logging.basicConfig(
@@ -47,7 +47,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("dj_mode")
 
-EMBEDDINGS_PATH = DATA_DIR / "embeddings_raw.npy"
+EMBEDDINGS_PATH = DATA_DIR / "embeddings_norm.npy"
 OVERRIDE_PATH   = DATA_DIR / "dj_override.txt"
 
 # How many nearby tracks to consider for normal hops (wide enough to find
@@ -61,7 +61,7 @@ class DJ:
         hop_interval_minutes: float = 30.0,
         hop_multiplier: float = 5.0,
         mode: str = "exact",
-        udp_port: int = 57001,
+        udp_port: int = 57002,
     ) -> None:
         self.hop_interval = hop_interval_minutes * 60.0  # seconds
         self.hop_multiplier = hop_multiplier
@@ -70,8 +70,8 @@ class DJ:
         # ── Load embeddings + metadata ────────────────────────────────────
         logger.info("Loading embeddings and metadata...")
         import faiss
-        self._index = faiss.read_index(str(FAISS_RAW_INDEX_PATH))
-        ids_arr = np.load(str(FAISS_RAW_IDS_PATH), allow_pickle=True)
+        self._index = faiss.read_index(str(FAISS_NORM_INDEX_PATH))
+        ids_arr = np.load(str(FAISS_NORM_IDS_PATH), allow_pickle=True)
         self._id_list = [str(t) for t in ids_arr]
         self._N = len(self._id_list)
         self._id_to_idx = {tid: i for i, tid in enumerate(self._id_list)}
@@ -97,18 +97,21 @@ class DJ:
         # ── Live audio embedding listener (coupled mode) ─────────────────
         self._live_emb: np.ndarray | None = None
         self._live_top1: str | None = None
+        # Always listen for live embeddings (needed for unknown track fallback)
+        self._start_udp_listener(udp_port)
         if self._mode == "listen":
-            self._start_udp_listener(udp_port)
             logger.info("Listen mode: hopping from live audio embedding (UDP %d)",
                         udp_port)
         else:
-            logger.info("Exact mode: hopping from stored preview embeddings")
+            logger.info("Exact mode: hopping from stored preview embeddings "
+                        "(live fallback on UDP %d for unknown tracks)", udp_port)
 
         # ── DJ state ─────────────────────────────────────────────────────
         self._played: set[str] = set()
         self._history: list[str] = []  # ordered list of played track IDs
         self._last_hop_time: float = time.monotonic()
-        self._queued_next: str | None = None
+        self._next_pick: str | None = None       # picked but not yet played
+        self._monitored_track: str | None = None  # Spotify track ID we're watching
         self._pending_hop_type: str | None = None
         self._rng = np.random.default_rng()
 
@@ -334,20 +337,24 @@ class DJ:
 
     def run(self, seed_track_id: str | None = None) -> None:
         """Main DJ loop."""
-        # Seed from argument, current Spotify track, or random
+        # Seed from argument, current Spotify track, or nearest via live embedding
         if seed_track_id is None:
             seed_track_id = self._get_current_spotify_track()
-        if seed_track_id is None or seed_track_id not in self._id_to_idx:
-            if seed_track_id:
-                logger.warning("Track %s not in library — picking random start",
-                               seed_track_id)
-            seed_track_id = self._id_list[self._rng.integers(0, self._N)]
-            self._play_track(seed_track_id)
-        else:
-            # Already playing — don't restart, just mark as current
+        if seed_track_id is not None and seed_track_id in self._id_to_idx:
+            # Known track — continue without interrupting
             self._played.add(seed_track_id)
             self._history.append(seed_track_id)
             logger.info("Continuing from: %s", self._track_name(seed_track_id))
+        elif seed_track_id is not None:
+            # Playing an unknown track — let it finish, then take control.
+            # Use a dummy history entry so the main loop knows we're waiting.
+            logger.info("Current track not in library — will take control when it ends")
+            self._history.append(seed_track_id)  # unknown ID as placeholder
+            self._played.add(seed_track_id)
+        else:
+            # Nothing playing
+            seed_track_id = self._id_list[self._rng.integers(0, self._N)]
+            self._play_track(seed_track_id)
 
         self._last_hop_time = time.monotonic()
 
@@ -362,34 +369,50 @@ class DJ:
                     self._last_hop_time = time.monotonic()
                     continue
 
-                # Check if Spotify track was manually changed
+                # Check if Spotify track changed (manual override or album advance).
+                # If we have a pending pick, ignore the change — we'll override
+                # it when the current track ends. Only react if the user clearly
+                # took control (changed to a known library track while we had
+                # no pending pick).
                 current = self._get_current_spotify_track()
-                if (current and current in self._id_to_idx
-                        and current != self._history[-1]):
-                    logger.info(
-                        "Spotify manual change detected: %s",
-                        self._track_name(current),
-                    )
-                    self._played.add(current)
-                    self._history.append(current)
-                    self._last_hop_time = time.monotonic()
-                    continue
+                if (current and current != self._history[-1]
+                        and self._next_pick is None):
+                    if current in self._id_to_idx:
+                        logger.info(
+                            "Manual change: %s", self._track_name(current),
+                        )
+                        self._played.add(current)
+                        self._history.append(current)
+                        self._last_hop_time = time.monotonic()
+                        continue
+                    else:
+                        logger.info(
+                            "Manual change to unknown track — "
+                            "will use live embedding at end"
+                        )
+                        self._history.append(current)
+                        self._last_hop_time = time.monotonic()
+                        continue
 
                 # Check remaining playback time
                 remaining = self._get_remaining_ms()
 
-                # Pick next track when ~10s remain (gives time to compute)
-                if remaining > 10000 or remaining == 0:
+                # If we already picked the next track, play it when song ends
+                if self._next_pick is not None:
+                    # Detect: monitored track changed (Spotify advanced) OR
+                    # remaining is low — either way, take control now
+                    track_changed = (
+                        self._monitored_track is not None
+                        and current != self._monitored_track
+                    )
+                    if track_changed or remaining <= 2000:
+                        self._play_track(self._next_pick)
+                        self._next_pick = None
+                        self._monitored_track = None
                     continue
 
-                # If we already queued the next track, just wait
-                if self._queued_next:
-                    if remaining > 1500:
-                        continue
-                    # Track ended — Spotify will auto-play the queued track.
-                    # Just mark it as played in our state.
-                    self._play_track(self._queued_next, via_queue=True)
-                    self._queued_next = None
+                # Nothing playing or too early to pick
+                if remaining == 0 or remaining > 8000:
                     continue
 
                 # Track ending — pick next
@@ -397,12 +420,20 @@ class DJ:
                 time_since_hop = now - self._last_hop_time
 
                 current_emb = self._get_embedding(self._history[-1])
+
+                # Use live audio embedding if: listen mode, OR current track
+                # is unknown (not in library — live embedding is our only signal)
+                if current_emb is None and self._live_emb is not None:
+                    current_emb = self._live_emb
+                    logger.info("Using live embedding (current track not in library)")
+                elif current_emb is None and self._live_emb is None:
+                    logger.debug("No embedding available (no stored, no live)")
+                    continue
+                elif self._mode == "listen" and self._live_emb is not None:
+                    current_emb = self._live_emb
+
                 if current_emb is None:
                     continue
-
-                # Listen mode: use the live audio embedding from the engine
-                if self._mode == "listen" and self._live_emb is not None:
-                    current_emb = self._live_emb
 
                 if time_since_hop >= self.hop_interval:
                     next_tid = self._pick_long_hop()
@@ -414,18 +445,12 @@ class DJ:
 
                 if next_tid:
                     self._pending_hop_type = hop_type
-                    # Queue via Spotify — lets current track finish naturally
-                    uri = f"spotify:track:{next_tid}"
-                    try:
-                        self._sp.add_to_queue(uri)
-                        self._queued_next = next_tid
-                        prefix = "LONG HOP queued" if hop_type == "LONG" else "Queued"
-                        logger.info(
-                            "%s: %s", prefix, self._track_name(next_tid),
-                        )
-                    except Exception as e:
-                        logger.warning("Queue failed, playing directly: %s", e)
-                        self._play_track(next_tid)
+                    self._next_pick = next_tid
+                    self._monitored_track = current  # watch for this to change
+                    prefix = "LONG HOP next" if hop_type == "LONG" else "Next"
+                    logger.info(
+                        "%s: %s", prefix, self._track_name(next_tid),
+                    )
                 else:
                     logger.warning("Could not find next track — resetting played set")
                     self._played.clear()
@@ -465,7 +490,7 @@ def main() -> None:
              "listen: hop from live audio embedding (requires main engine).",
     )
     parser.add_argument(
-        "--port", type=int, default=57001,
+        "--port", type=int, default=57002,
         help="UDP port to receive engine broadcasts (listen mode)",
     )
     args = parser.parse_args()

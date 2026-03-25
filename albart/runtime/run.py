@@ -126,18 +126,22 @@ def main() -> None:
     if "error" in model_store:
         raise RuntimeError("CLAP model failed to load") from model_store["error"]
 
-    # --- UDP broadcast to map display process (no-op if port not configured) ---
+    # --- UDP broadcast to map display + DJ process ---
     map_port = rt.get("map_broadcast_port", 0)
+    dj_port  = rt.get("dj_broadcast_port", 57002)
     map_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
     def _broadcast_map(emb: "np.ndarray", top1_id: str, d_min_raw: float) -> None:
-        if not map_port:
+        if not map_port and not dj_port:
             return
         try:
             data = pickle.dumps({
                 "raw": emb, "top1": top1_id, "d_min_raw": d_min_raw,
             })
-            map_sock.sendto(data, ("127.0.0.1", map_port))
+            if map_port:
+                map_sock.sendto(data, ("127.0.0.1", map_port))
+            if dj_port:
+                map_sock.sendto(data, ("127.0.0.1", dj_port))
         except Exception as e:
             logger.debug("Map broadcast error: %s", e)
 

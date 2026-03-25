@@ -39,7 +39,7 @@ def main() -> None:
     import numpy as np
     import faiss
     from albart.pipeline.database import DB_PATH, get_connection
-    from albart.pipeline.embedder import FAISS_RAW_INDEX_PATH, FAISS_RAW_IDS_PATH
+    from albart.pipeline.embedder import FAISS_NORM_INDEX_PATH, FAISS_NORM_IDS_PATH
     from albart.utils import DATA_DIR
 
     logging.basicConfig(level=logging.WARNING)
@@ -47,12 +47,12 @@ def main() -> None:
     logging.getLogger("dj_mode").setLevel(logging.WARNING)
 
     print("Loading data...")
-    dj._index = faiss.read_index(str(FAISS_RAW_INDEX_PATH))
-    ids_arr = np.load(str(FAISS_RAW_IDS_PATH), allow_pickle=True)
+    dj._index = faiss.read_index(str(FAISS_NORM_INDEX_PATH))
+    ids_arr = np.load(str(FAISS_NORM_IDS_PATH), allow_pickle=True)
     dj._id_list = [str(t) for t in ids_arr]
     dj._N = len(dj._id_list)
     dj._id_to_idx = {tid: i for i, tid in enumerate(dj._id_list)}
-    dj._embeddings = np.load(str(DATA_DIR / "embeddings_raw.npy")).astype(np.float32)
+    dj._embeddings = np.load(str(DATA_DIR / "embeddings_norm.npy")).astype(np.float32)
 
     conn = get_connection(DB_PATH)
     rows = conn.execute("SELECT track_id, title, artist FROM tracks").fetchall()
