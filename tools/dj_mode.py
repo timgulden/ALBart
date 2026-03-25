@@ -94,6 +94,12 @@ class DJ:
         user = self._sp.current_user()
         logger.info("Logged in as: %s", user["display_name"])
 
+        # ── Map display broadcast (send embeddings directly to map) ──────
+        self._map_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._map_port = 57001
+        self._map_cached_tid: str | None = None
+        self._map_cached_emb: np.ndarray | None = None
+
         # ── Live audio embedding listener (coupled mode) ─────────────────
         self._live_emb: np.ndarray | None = None
         self._live_top1: str | None = None
@@ -262,10 +268,15 @@ class DJ:
         if not candidates:
             return self._pick_normal_hop(emb_curr)
 
-        # Pick from candidates (slight randomness)
+        # Pick from candidates with artist penalty
+        recent_artists = self._recent_artists(3)
         tids = [c[0] for c in candidates]
         dists = np.array([c[1] for c in candidates])
         weights = 1.0 / np.maximum(dists, 1e-8)
+        for i, tid in enumerate(tids):
+            r = self._db.get(tid)
+            if r and r["artist"] and r["artist"].lower() in recent_artists:
+                weights[i] *= 0.1
         weights /= weights.sum()
         chosen = self._rng.choice(len(tids), p=weights)
 
@@ -277,15 +288,38 @@ class DJ:
         )
         return tids[chosen]
 
+    def _get_active_device(self) -> str | None:
+        """Find an active Spotify device to play on."""
+        try:
+            devices = self._sp.devices()
+            for d in devices.get("devices", []):
+                if d.get("is_active"):
+                    return d["id"]
+            # No active device — try the first available
+            for d in devices.get("devices", []):
+                return d["id"]
+        except Exception:
+            pass
+        return None
+
     def _play_track(self, tid: str, via_queue: bool = False) -> bool:
         """Start playing a track on Spotify. Returns True on success."""
         if not via_queue:
             uri = f"spotify:track:{tid}"
             try:
                 self._sp.start_playback(uris=[uri])
-            except Exception as e:
-                logger.error("Playback failed for %s: %s", tid, e)
-                return False
+            except Exception:
+                # Might fail if no active device — find one and retry
+                device = self._get_active_device()
+                if device:
+                    try:
+                        self._sp.start_playback(uris=[uri], device_id=device)
+                    except Exception as e:
+                        logger.error("Playback failed for %s: %s", tid, e)
+                        return False
+                else:
+                    logger.error("No Spotify device available for %s", tid)
+                    return False
         self._played.add(tid)
         self._history.append(tid)
         hop_label = ""
@@ -296,7 +330,34 @@ class DJ:
             "▶  %s  [played: %d / %d]%s",
             self._track_name(tid), len(self._played), self._N, hop_label,
         )
+        # Broadcast embedding to map display (works without main engine)
+        self._broadcast_to_map(tid)
         return True
+
+    def _broadcast_to_map(self, tid: str) -> None:
+        """Send this track's embedding to the map display via UDP.
+
+        Uses a cached noisy version (computed once per track) to avoid the
+        exact-match void without jiggling the display.
+        """
+        if tid != self._map_cached_tid:
+            emb = self._get_embedding(tid)
+            if emb is None:
+                logger.debug("No embedding for %s — skip broadcast", tid)
+                return
+            # Add noise once so the query isn't an exact self-match
+            noisy = emb.astype(np.float64) + self._rng.normal(size=512) * 0.04
+            self._map_cached_emb = (
+                noisy / (np.linalg.norm(noisy) + 1e-8)
+            ).astype(np.float32)
+            self._map_cached_tid = tid
+        try:
+            data = pickle.dumps({
+                "raw": self._map_cached_emb, "top1": tid, "d_min_raw": 0.05,
+            })
+            self._map_sock.sendto(data, ("127.0.0.1", self._map_port))
+        except Exception as e:
+            logger.warning("Map broadcast failed: %s", e)
 
     def _get_current_spotify_track(self) -> str | None:
         """Get the currently playing Spotify track ID (None if nothing)."""
@@ -305,7 +366,7 @@ class DJ:
             if pb and pb.get("is_playing") and pb.get("item"):
                 return pb["item"]["id"]
             else:
-                logger.info("Spotify: nothing playing or paused")
+                pass  # normal between-track gap
         except Exception as e:
             logger.warning("Could not get Spotify playback: %s", e)
         return None
@@ -361,6 +422,26 @@ class DJ:
         try:
             while True:
                 time.sleep(3)  # poll every 3 seconds
+
+                # Keep the map display updated with current track's embedding
+                # (works as standalone visualization when no engine is running)
+                if self._history:
+                    last = self._history[-1]
+                    if last in self._id_to_idx:
+                        self._broadcast_to_map(last)
+                    elif self._live_emb is not None:
+                        # Unknown track — send the live embedding instead
+                        try:
+                            data = pickle.dumps({
+                                "raw": self._live_emb,
+                                "top1": last,
+                                "d_min_raw": 0.05,
+                            })
+                            self._map_sock.sendto(
+                                data, ("127.0.0.1", self._map_port)
+                            )
+                        except Exception:
+                            pass
 
                 # Check for map click override
                 override = self._check_override()
@@ -446,11 +527,7 @@ class DJ:
                 if next_tid:
                     self._pending_hop_type = hop_type
                     self._next_pick = next_tid
-                    self._monitored_track = current  # watch for this to change
-                    prefix = "LONG HOP next" if hop_type == "LONG" else "Next"
-                    logger.info(
-                        "%s: %s", prefix, self._track_name(next_tid),
-                    )
+                    self._monitored_track = current
                 else:
                     logger.warning("Could not find next track — resetting played set")
                     self._played.clear()

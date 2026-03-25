@@ -1,4 +1,4 @@
-"""3D perspective neighborhood visualization.
+"""3D perspective neighborhood visualization — OpenGL GPU-accelerated.
 
 Shows the live audio embedding as a shaded sphere at screen-center, surrounded
 by album art thumbnails from the entire library.
@@ -9,8 +9,8 @@ Hybrid projection:
     to the current query — showing the most interesting slice of the 5-D space.
   - Actual 512-D L2 distances, shifted so the nearest track is at the origin,
     determine radial distance from the sphere.
-  - Each track is placed at:  PCA_direction × (L2 - L2_min) / median_shifted
-  - |z| perspective with Z cutoff and depth fade.
+  - OpenGL textured quads at float positions → GPU handles sub-pixel
+    interpolation → perfectly smooth rotation and lerp.
 """
 
 from __future__ import annotations
@@ -21,6 +21,8 @@ from typing import Optional
 
 import numpy as np
 import pygame
+from pygame.locals import DOUBLEBUF, NOFRAME, OPENGL
+from OpenGL.GL import *  # noqa: F403,F401
 from PIL import Image
 
 from albart.pipeline.database import DB_PATH, get_connection
@@ -32,11 +34,11 @@ logger = logging.getLogger(__name__)
 np.seterr(all="ignore")
 
 EMBEDDINGS_PATH = DATA_DIR / "embeddings_norm.npy"
-UMAP_5D_PATH        = DATA_DIR / "umap_5d.npy"
+UMAP_5D_PATH    = DATA_DIR / "umap_5d.npy"
 
 
 class NeighborhoodDisplay:
-    """3D perspective neighborhood visualization around the live audio.
+    """3D perspective neighborhood visualization — OpenGL rendering.
 
     Interface matches MapDisplay: call update() on new embeddings,
     render(dt) at display_fps.
@@ -101,14 +103,13 @@ class NeighborhoodDisplay:
             self._N = len(self._id_list)
 
         self._all_embeddings = all_emb
-        self._all_umap_5d = all_umap_5d  # (N, 5) — fixed global structure
+        self._all_umap_5d = all_umap_5d
 
-        # Pre-compute squared norms for fast L2 distance computation
         self._all_norms_sq = np.sum(
             self._all_embeddings.astype(np.float64) ** 2, axis=1
         )
 
-        # ── Track metadata + art ─────────────────────────────────────────
+        # ── Track metadata ────────────────────────────────────────────────
         conn = get_connection(DB_PATH)
         rows = conn.execute(
             "SELECT track_id, title, artist, art_path_32, art_path_original "
@@ -117,6 +118,7 @@ class NeighborhoodDisplay:
         conn.close()
         self._db_rows: dict = {row["track_id"]: row for row in rows}
 
+        # ── Load PIL images (for GL texture upload) ───────────────────────
         logger.info("Pre-loading thumbnail images...")
         self._pil_thumbs: dict[str, Optional[Image.Image]] = {}
         for tid in self._id_list:
@@ -126,129 +128,211 @@ class NeighborhoodDisplay:
                 try:
                     self._pil_thumbs[tid] = Image.open(
                         DATA_DIR / path
-                    ).convert("RGB")
+                    ).convert("RGBA")
                 except Exception:
                     self._pil_thumbs[tid] = None
             else:
                 self._pil_thumbs[tid] = None
 
-        # ── Pygame setup ─────────────────────────────────────────────────
+        # ── Pygame + OpenGL setup ─────────────────────────────────────────
         pygame.init()
         pygame.font.init()
+        # Enable 4× multisampling for smooth polygon edges
+        pygame.display.gl_set_attribute(pygame.GL_MULTISAMPLEBUFFERS, 1)
+        pygame.display.gl_set_attribute(pygame.GL_MULTISAMPLESAMPLES, 4)
+        # VSync: sync frame swaps to display refresh for even timing
+        pygame.display.gl_set_attribute(pygame.GL_SWAP_CONTROL, 1)
         self._screen = pygame.display.set_mode(
-            (self._canvas_w, self._canvas_h), pygame.NOFRAME
+            (self._canvas_w, self._canvas_h), OPENGL | DOUBLEBUF | NOFRAME
         )
         pygame.display.set_caption("ALBart — Neighborhood")
+
+        # OpenGL state
+        glViewport(0, 0, self._canvas_w, self._canvas_h)
+        glMatrixMode(GL_PROJECTION)
+        glLoadIdentity()
+        glOrtho(0, self._canvas_w, self._canvas_h, 0, -1, 1)
+        glMatrixMode(GL_MODELVIEW)
+        glLoadIdentity()
+        glEnable(GL_TEXTURE_2D)
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        glEnable(GL_MULTISAMPLE)
+        glClearColor(0, 0, 0, 1)
+
+        self._cx = self._canvas_w / 2.0
+        self._cy = self._canvas_h / 2.0
+
         font_size = max(14, self._canvas_w // 160)
         self._font = pygame.font.SysFont("Arial", font_size)
 
-        self._cx = self._canvas_w // 2
-        self._cy = self._canvas_h // 2
-
-        # ── Pre-render sphere sprites ────────────────────────────────────
-        self._sphere_sprites = self._build_sphere_sprites(sphere_base_radius)
+        # ── GL texture caches ─────────────────────────────────────────────
+        self._gl_textures: dict[str, int] = {}  # tid → GL texture
+        self._sphere_tex: int = 0
         self._sphere_base_radius = sphere_base_radius
-
-        # ── Thumbnail surface cache ──────────────────────────────────────
-        self._thumb_cache: dict[tuple[str, int], pygame.Surface] = {}
+        self._sphere_tex = self._build_sphere_texture(sphere_base_radius)
+        self._label_tex: int = 0
+        self._label_tex_w: int = 0
+        self._label_tex_h: int = 0
+        self._prev_label_text: str = ""
 
         # ── Projection state ─────────────────────────────────────────────
         self._L2_median_shift: float = 1.0
 
-        # Cached PCA basis (5D→3D) — recomputed only on big embedding moves
-        self._W: Optional[np.ndarray] = None       # (5, 3) float32
-        self._cached_q_5d: Optional[np.ndarray] = None  # (5,) float32
-
-        # Recompute gate for PCA basis
+        self._W: Optional[np.ndarray] = None
+        self._cached_q_5d: Optional[np.ndarray] = None
         self._last_pca_emb: Optional[np.ndarray] = None
         self._recompute_threshold = recompute_threshold
         self._recompute_consecutive = recompute_consecutive
         self._consecutive_far: int = 0
 
-        # Auto-zoom
         self._ppu: float = 1695.0
         self._target_on_screen: int = 500
 
-        # Hybrid positions (updated per cycle)
-        self._all_proj:        Optional[np.ndarray] = None  # (N, 3) float32
-        self._all_proj_smooth: Optional[np.ndarray] = None  # (N, 3) float32
+        self._all_proj:        Optional[np.ndarray] = None
+        self._all_proj_smooth: Optional[np.ndarray] = None
 
-        # ── Heatmap trail ────────────────────────────────────────────────
-        self._heatmap_surf = pygame.Surface(
-            (self._canvas_w, self._canvas_h), pygame.SRCALPHA
-        )
-        self._heatmap_surf.fill((0, 0, 0, 0))
-        self._heatmap_decay_rate = np.log(128.0) / trail_max_seconds
-        dot_r = max(8, self._canvas_w // 240)
-        stamp = pygame.Surface(
-            (dot_r * 2 + 1, dot_r * 2 + 1), pygame.SRCALPHA
-        )
-        stamp.fill((0, 0, 0, 0))
-        pygame.draw.circle(stamp, (255, 255, 255, 255), (dot_r, dot_r), dot_r)
-        self._heatmap_stamp   = stamp
-        self._heatmap_stamp_r = dot_r
-        self._prev_center: Optional[tuple[int, int]] = None
+        # Camera orbit (time-based, not frame-based)
+        self._cam_angle: float = 0.0
+        self._cam_rate:  float = 0.012          # radians per second (~0.7°/s)
+        self._cam_tilt:  float = 0.12
 
         # ── Hover / tooltip state ────────────────────────────────────────
         self._hover_track_id:  Optional[str] = None
         self._hover_alpha:     float = 0.0
-        self._hover_art_cache: dict[str, Optional[pygame.Surface]] = {}
         self._tooltip_size     = self._canvas_w // 16
         self._frame_vis:    np.ndarray = np.empty(0, dtype=np.int32)
-        self._frame_sx:     np.ndarray = np.empty(0, dtype=np.int32)
-        self._frame_sy:     np.ndarray = np.empty(0, dtype=np.int32)
-        self._frame_halfpx: np.ndarray = np.empty(0, dtype=np.int32)
+        self._frame_sx:     np.ndarray = np.empty(0, dtype=np.float32)
+        self._frame_sy:     np.ndarray = np.empty(0, dtype=np.float32)
+        self._frame_halfpx: np.ndarray = np.empty(0, dtype=np.float32)
 
         logger.info(
             "NeighborhoodDisplay ready — canvas=%dx%d  K=%d  "
-            "lerp=%.2f  N=%d  (5D UMAP + local PCA)",
+            "lerp=%.2f  N=%d  (OpenGL + 5D UMAP)",
             self._canvas_w, self._canvas_h, neighborhood_k,
             lerp_speed, self._N,
         )
 
-    # ── Sphere pre-rendering ─────────────────────────────────────────────
+    # ── GL texture helpers ────────────────────────────────────────────────
 
-    @staticmethod
-    def _build_sphere_sprites(
-        max_radius: int, num_sizes: int = 24
-    ) -> dict[int, pygame.Surface]:
-        sprites: dict[int, pygame.Surface] = {}
-        for r in np.linspace(6, max_radius, num_sizes).astype(int):
-            r = int(r)
-            size = r * 2 + 1
-            yy, xx = np.mgrid[:size, :size]
-            d_center    = np.sqrt((xx - r) ** 2.0 + (yy - r) ** 2.0)
-            hx, hy      = r * 0.65, r * 0.65
-            d_highlight = np.sqrt((xx - hx) ** 2.0 + (yy - hy) ** 2.0)
-            mask        = d_center <= r
-            brightness  = np.clip(
-                1.0 - d_highlight / (r * 1.4), 0.0, 1.0
-            ) ** 0.55
-            edge_alpha  = np.clip(1.0 - (d_center / r) ** 2.0, 0.0, 1.0)
-            rgba = np.zeros((size, size, 4), dtype=np.uint8)
-            rgba[..., 0] = (210 * brightness * mask).astype(np.uint8)
-            rgba[..., 1] = (210 * brightness * mask).astype(np.uint8)
-            rgba[..., 2] = (
-                np.clip(210 * brightness + 25, 0, 255).astype(np.uint8) * mask
-            )
-            rgba[..., 3] = (255 * edge_alpha * mask).astype(np.uint8)
-            surf = pygame.image.frombuffer(
-                rgba.tobytes(), (size, size), "RGBA"
-            )
-            sprites[r] = surf.convert_alpha()
-        return sprites
+    def _upload_rgba(self, data: bytes, w: int, h: int,
+                     mipmap: bool = False) -> int:
+        """Upload RGBA pixel data to a GL texture. Returns texture ID."""
+        tex = glGenTextures(1)
+        glBindTexture(GL_TEXTURE_2D, tex)
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, data)
+        if mipmap:
+            glGenerateMipmap(GL_TEXTURE_2D)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+                            GL_LINEAR_MIPMAP_LINEAR)
+        else:
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+        return tex
 
-    def _get_sphere(self, target_radius: int) -> pygame.Surface:
-        keys = sorted(self._sphere_sprites.keys())
-        best = min(keys, key=lambda k: abs(k - target_radius))
-        return self._sphere_sprites[best]
+    def _get_track_texture(self, tid: str) -> int:
+        """Get or create GL texture for a track's album art."""
+        if tid in self._gl_textures:
+            return self._gl_textures[tid]
+        pil_img = self._pil_thumbs.get(tid)
+        if pil_img is None:
+            self._gl_textures[tid] = 0
+            return 0
+        # Add 1px transparent-black border to prevent white fringe
+        # from bilinear filtering at edges
+        w, h = pil_img.width + 2, pil_img.height + 2
+        bordered = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        bordered.paste(pil_img, (1, 1))
+        # Flip vertically for OpenGL's bottom-up texture layout
+        flipped = bordered.transpose(Image.FLIP_TOP_BOTTOM)
+        data = flipped.tobytes()
+        tex = self._upload_rgba(data, w, h, mipmap=True)
+        self._gl_textures[tid] = tex
+        return tex
+
+    def _build_sphere_texture(self, radius: int) -> int:
+        """Build the glowing sphere as a GL texture."""
+        size = radius * 2 + 1
+        yy, xx = np.mgrid[:size, :size]
+        d_center = np.sqrt((xx - radius) ** 2.0 + (yy - radius) ** 2.0)
+        hx, hy = radius * 0.65, radius * 0.65
+        d_highlight = np.sqrt((xx - hx) ** 2.0 + (yy - hy) ** 2.0)
+        mask = d_center <= radius
+        brightness = np.clip(
+            1.0 - d_highlight / (radius * 1.4), 0.0, 1.0
+        ) ** 0.55
+        edge_alpha = np.clip(1.0 - (d_center / radius) ** 2.0, 0.0, 1.0)
+        rgba = np.zeros((size, size, 4), dtype=np.uint8)
+        rgba[..., 0] = (210 * brightness * mask).astype(np.uint8)
+        rgba[..., 1] = (210 * brightness * mask).astype(np.uint8)
+        rgba[..., 2] = (
+            np.clip(210 * brightness + 25, 0, 255).astype(np.uint8) * mask
+        )
+        rgba[..., 3] = (255 * edge_alpha * mask).astype(np.uint8)
+        return self._upload_rgba(rgba[::-1].tobytes(), size, size)
+
+    def _draw_quad(self, tex: int, cx: float, cy: float,
+                   half_w: float, half_h: float, alpha: float = 1.0,
+                   border: bool = False) -> None:
+        """Draw a textured quad centered at (cx, cy) with given half-sizes.
+
+        border=True: texture has a 1px transparent border; adjust UVs to
+        sample only the inner art region.
+        """
+        if tex == 0:
+            return
+        glBindTexture(GL_TEXTURE_2D, tex)
+        glColor4f(1.0, 1.0, 1.0, alpha)
+        if border:
+            # Query actual texture size to compute UV insets
+            tw = glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH)
+            th = glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT)
+            u0 = 1.0 / tw if tw > 2 else 0.0
+            v0 = 1.0 / th if th > 2 else 0.0
+            u1 = 1.0 - u0
+            v1 = 1.0 - v0
+        else:
+            u0, v0, u1, v1 = 0.0, 0.0, 1.0, 1.0
+        glBegin(GL_QUADS)
+        glTexCoord2f(u0, v1); glVertex2f(cx - half_w, cy - half_h)
+        glTexCoord2f(u1, v1); glVertex2f(cx + half_w, cy - half_h)
+        glTexCoord2f(u1, v0); glVertex2f(cx + half_w, cy + half_h)
+        glTexCoord2f(u0, v0); glVertex2f(cx - half_w, cy + half_h)
+        glEnd()
+
+    def _update_label_texture(self) -> None:
+        """Re-render label text to GL texture when text changes."""
+        if self._label_text == self._prev_label_text:
+            return
+        self._prev_label_text = self._label_text
+        if self._label_tex:
+            glDeleteTextures([self._label_tex])
+            self._label_tex = 0
+        if not self._label_text:
+            return
+        lines = self._label_text.split("\n")
+        surfs = [self._font.render(ln, True, (220, 220, 220)) for ln in lines]
+        lh = self._font.get_linesize()
+        w = max(s.get_width() for s in surfs) + 12
+        h = len(surfs) * lh + 8
+        combined = pygame.Surface((w, h), pygame.SRCALPHA)
+        combined.fill((0, 0, 0, 160))
+        for j, s in enumerate(surfs):
+            combined.blit(s, (6 + (w - 12 - s.get_width()) // 2, 4 + j * lh))
+        data = pygame.image.tostring(combined, "RGBA", True)
+        self._label_tex = self._upload_rgba(data, w, h)
+        self._label_tex_w = w
+        self._label_tex_h = h
 
     # ── Text helpers ─────────────────────────────────────────────────────
 
     @staticmethod
     def _wrap_text(text: str, max_chars: int) -> list[str]:
-        words   = text.split()
-        lines:  list[str] = []
+        words = text.split()
+        lines: list[str] = []
         current = ""
         for word in words:
             if current and len(current) + 1 + len(word) > max_chars:
@@ -260,99 +344,40 @@ class NeighborhoodDisplay:
             lines.append(current)
         return lines or [text]
 
-    # ── Thumbnail cache ──────────────────────────────────────────────────
-
-    def _get_cached_thumb(
-        self, track_id: str, target_px: int
-    ) -> Optional[pygame.Surface]:
-        size = max(2, target_px)
-        key  = (track_id, size)
-        if key not in self._thumb_cache:
-            pil_img = self._pil_thumbs.get(track_id)
-            if pil_img is None:
-                return None
-            try:
-                resized = pil_img.resize((size, size), Image.LANCZOS)
-                arr     = np.array(resized, dtype=np.uint8)
-                self._thumb_cache[key] = pygame.surfarray.make_surface(
-                    arr.swapaxes(0, 1)
-                )
-            except Exception:
-                return None
-        return self._thumb_cache[key]
-
-    # ── Tooltip ──────────────────────────────────────────────────────────
-
-    def _get_tooltip_surface(self, track_id: str) -> Optional[pygame.Surface]:
-        if track_id in self._hover_art_cache:
-            return self._hover_art_cache[track_id]
-        pil_img = self._pil_thumbs.get(track_id)
-        surf    = None
-        if pil_img is not None:
-            try:
-                resized = pil_img.resize(
-                    (self._tooltip_size, self._tooltip_size), Image.LANCZOS
-                )
-                arr  = np.array(resized, dtype=np.uint8)
-                surf = pygame.surfarray.make_surface(arr.swapaxes(0, 1))
-            except Exception:
-                pass
-        self._hover_art_cache[track_id] = surf
-        return surf
-
-    # ── Projection pipeline ──────────────────────────────────────────────
+    # ── Projection pipeline (same math as before) ────────────────────────
 
     def _recompute_pca_basis(self, emb: np.ndarray, L2: np.ndarray) -> None:
-        """Recompute the 5D→3D PCA basis from K nearest neighbors.
-
-        Called infrequently (gated by recompute_threshold/consecutive).
-        """
         K_pos = min(self._neighborhood_k, self._N)
         nearest_idx = np.argpartition(L2, K_pos)[:K_pos]
         nearest_L2 = L2[nearest_idx]
-
-        # Query's 5D UMAP position (weighted avg of nearest tracks)
         weights = 1.0 / np.maximum(nearest_L2, 1e-8)
         weights /= weights.sum()
         q_5d = (weights[:, None] * self._all_umap_5d[nearest_idx]).sum(axis=0)
         self._cached_q_5d = q_5d.astype(np.float32)
-
-        # Local PCA on K nearest neighbors in 5D UMAP space
         rel_5d_nb = (self._all_umap_5d[nearest_idx] - q_5d).astype(np.float64)
-        cov = rel_5d_nb.T @ rel_5d_nb  # (5, 5)
+        cov = rel_5d_nb.T @ rel_5d_nb
         _, _, Vt = np.linalg.svd(cov)
-        W = Vt[:3, :].T.astype(np.float32)  # (5, 3)
-
-        # Procrustes: align to previous basis
+        W = Vt[:3, :].T.astype(np.float32)
         if self._W is not None:
-            M = self._W.T @ W  # (3, 3)
+            M = self._W.T @ W
             U_p, _, Vt_p = np.linalg.svd(M.astype(np.float64))
             d = np.sign(np.linalg.det(Vt_p.T @ U_p.T))
             R = (Vt_p.T @ np.diag([1.0, 1.0, d]) @ U_p.T).astype(np.float32)
             W = W @ R
-
         self._W = W
         self._last_pca_emb = np.nan_to_num(emb).copy()
         self._consecutive_far = 0
         logger.info("PCA basis recomputed (5D→3D)")
 
     def _compute_positions(self, emb: np.ndarray) -> np.ndarray:
-        """Compute hybrid 3D positions using cached PCA basis + fresh L2.
-
-        Called every cycle.
-        """
         q64 = np.nan_to_num(
             emb, nan=0.0, posinf=0.0, neginf=0.0
         ).astype(np.float64).ravel()
-
-        # L2 distances to all tracks
         q_norm_sq = float(np.dot(q64, q64))
         dots = self._all_embeddings.astype(np.float64) @ q64
         L2_sq = self._all_norms_sq + q_norm_sq - 2.0 * dots
         np.clip(L2_sq, 0.0, None, out=L2_sq)
         L2 = np.sqrt(L2_sq)
-
-        # Shifted L2: nearest at 0, normalized by median of K-nearest
         L2_min = float(L2.min())
         L2_shifted = np.maximum(L2 - L2_min, 0.0)
         top_K = np.sort(L2_shifted)[:self._neighborhood_k]
@@ -361,7 +386,6 @@ class NeighborhoodDisplay:
         self._L2_median_shift = max(med, 1e-8)
         L2_norm = (L2_shifted / self._L2_median_shift).astype(np.float32)
 
-        # Recompute gate: only update PCA basis on big moves
         if self._last_pca_emb is not None:
             dist_moved = float(np.linalg.norm(q64 - self._last_pca_emb))
             if dist_moved > self._recompute_threshold:
@@ -371,28 +395,22 @@ class NeighborhoodDisplay:
             needs_recompute = self._consecutive_far >= self._recompute_consecutive
         else:
             needs_recompute = True
-
         if needs_recompute:
             self._recompute_pca_basis(emb, L2)
 
-        # Update query's 5D position (weighted avg — smooth, not a basis change)
         K_pos = min(self._neighborhood_k, self._N)
         nearest_idx = np.argpartition(L2, K_pos)[:K_pos]
         nearest_L2 = L2[nearest_idx]
         weights = 1.0 / np.maximum(nearest_L2, 1e-8)
         weights /= weights.sum()
         q_5d = (weights[:, None] * self._all_umap_5d[nearest_idx]).sum(axis=0)
-
-        # Project all tracks through cached W
-        rel_5d = self._all_umap_5d - q_5d   # (N, 5)
-        rel_3d = rel_5d @ self._W            # (N, 3)
-
-        # Hybrid: 3D direction × shifted L2
+        rel_5d = self._all_umap_5d - q_5d
+        rel_3d = rel_5d @ self._W
         r_3d = np.linalg.norm(rel_3d, axis=1, keepdims=True)
         dirs = rel_3d / np.maximum(r_3d, 1e-8)
         return (dirs * L2_norm[:, None]).astype(np.float32)
 
-    # ── Update (called on new UDP embedding) ──────────────────────────────
+    # ── Update ────────────────────────────────────────────────────────────
 
     def update(
         self,
@@ -412,13 +430,12 @@ class NeighborhoodDisplay:
         else:
             self._label_text = ""
 
-        d_eff            = max(0.0, d_min_raw - self._brightness_floor)
-        base             = float(np.exp(-self._brightness_k * d_eff))
+        d_eff = max(0.0, d_min_raw - self._brightness_floor)
+        base = float(np.exp(-self._brightness_k * d_eff))
         self._confidence = base ** self._brightness_power
 
         emb_clean = np.nan_to_num(emb_raw, nan=0.0, posinf=0.0, neginf=0.0)
 
-        # Rate-limit: skip if less than 10s since last computation
         now = time.monotonic()
         if not hasattr(self, "_last_update_time"):
             self._last_update_time = 0.0
@@ -440,18 +457,21 @@ class NeighborhoodDisplay:
                 self._all_proj - self._all_proj_smooth
             )
 
+        # Camera orbit (dt-scaled for frame-rate independence)
+        self._cam_angle += self._cam_rate * dt
+
         # Hover detection
         if not pygame.mouse.get_focused():
             self._hover_track_id = None
         elif len(self._frame_vis) > 0:
             mx, my = pygame.mouse.get_pos()
-            dists  = np.hypot(
+            dists = np.hypot(
                 self._frame_sx - mx, self._frame_sy - my
-            ).astype(np.float32)
-            best      = int(np.argmin(dists))
-            hit_r     = max(int(self._frame_halfpx[best]), 20)
+            )
+            best = int(np.argmin(dists))
+            hit_r = max(float(self._frame_halfpx[best]), 20.0)
             track_idx = int(self._frame_vis[best])
-            tid       = self._id_list[track_idx]
+            tid = self._id_list[track_idx]
             new_hover = tid if dists[best] < hit_r else None
             if new_hover != self._hover_track_id:
                 self._hover_track_id = new_hover
@@ -462,7 +482,7 @@ class NeighborhoodDisplay:
         else:
             self._hover_alpha = max(0.0, self._hover_alpha - fade)
 
-    # ── Rendering ────────────────────────────────────────────────────────
+    # ── Rendering (OpenGL) ────────────────────────────────────────────────
 
     def render(self, dt: float) -> None:
         for event in pygame.event.get():
@@ -474,170 +494,184 @@ class NeighborhoodDisplay:
                 self._handle_click(event.pos)
 
         self._tick(dt)
-        self._screen.fill((0, 0, 0))
-
-        # Heatmap decay + blit
-        alpha_px = pygame.surfarray.pixels_alpha(self._heatmap_surf)
-        decay    = float(np.exp(-dt * self._heatmap_decay_rate))
-        np.multiply(alpha_px, decay, out=alpha_px, casting="unsafe")
-        del alpha_px
-        self._screen.blit(self._heatmap_surf, (0, 0))
+        glClear(GL_COLOR_BUFFER_BIT)
 
         if self._all_proj_smooth is None:
             self._draw_sphere()
             pygame.display.flip()
             return
 
-        # ── |z| perspective projection ────────────────────────────────────
-        rel   = self._all_proj_smooth
-        abs_z = np.abs(rel[:, 2])
+        # ── Camera orbit rotation ─────────────────────────────────────────
+        ca, sa = np.cos(self._cam_angle), np.sin(self._cam_angle)
+        ce, se = np.cos(self._cam_tilt), np.sin(self._cam_tilt)
+        R = np.array([
+            [ ca,   sa * se,  sa * ce],
+            [ 0.0,  ce,      -se     ],
+            [-sa,   ca * se,  ca * ce],
+        ], dtype=np.float32)
+        rel = self._all_proj_smooth @ R.T
 
-        # Z cutoff: limit depth to the visible Y extent at z=0
+        # ── Perspective projection (raw z, float positions) ───────────────
+        z = rel[:, 2]
+        in_front = z > -self._z_near
+
+        depth = np.maximum(z + self._z_near, 0.01)
+        scale = self._focal_length / (depth + self._focal_length)
+
+        # Float positions — GPU handles sub-pixel interpolation
+        sx = self._cx + rel[:, 0] * scale * self._ppu
+        sy = self._cy + rel[:, 1] * scale * self._ppu
+
         scale_at_z0 = self._focal_length / (self._z_near + self._focal_length)
         max_z = (self._canvas_h / 2.0) / (scale_at_z0 * self._ppu)
-        z_ok  = abs_z <= max_z
+        z_ok = z <= max_z
 
-        depth = abs_z + self._z_near
-        scale = self._focal_length / (depth + self._focal_length)
-        sx    = (self._cx + rel[:, 0] * scale * self._ppu).astype(np.int32)
-        sy    = (self._cy + rel[:, 1] * scale * self._ppu).astype(np.int32)
-
-        # Size: perspective × z-fade (shrinks to 10px at depth limit)
-        z_frac    = np.clip(abs_z / max(max_z, 1e-8), 0.0, 1.0)
+        # Size with depth fade + proximity boost
+        z_frac = np.clip(z / max(max_z, 1e-8), 0.0, 1.0)
         min_thumb = 10.0
         max_thumb = float(self._base_thumb_px) * scale_at_z0
-        z_thumb   = max_thumb * (1.0 - z_frac) + min_thumb * z_frac
-        tpx       = np.maximum(1, np.minimum(
-            self._base_thumb_px * scale, z_thumb
-        ) + 0.5).astype(np.int32)
+        z_thumb = max_thumb * (1.0 - z_frac) + min_thumb * z_frac
 
-        # On-screen mask (x,y bounds + z cutoff)
-        half   = tpx // 2
+        r_3d = np.sqrt(rel[:, 0] ** 2 + rel[:, 1] ** 2 + rel[:, 2] ** 2)
+        proximity_boost = 1.0 + 0.5 * np.exp(-r_3d * 8.0)
+
+        tpx = np.maximum(1.0, np.minimum(
+            self._base_thumb_px * scale, z_thumb
+        ) * proximity_boost)
+
+        # Alpha fade near depth boundaries (prevents pop-in/pop-out)
+        # Fade out near max_z (back edge)
+        fade_zone = max_z * 0.15
+        back_alpha = np.clip((max_z - z) / max(fade_zone, 1e-8), 0.0, 1.0)
+        # Foreground fade: tracks between camera and sphere (z<0) become
+        # transparent.  Fully opaque at z=0, fully transparent at z = -fade_front.
+        fade_front = self._z_near * 1.5  # fade over 1.5× the camera distance
+        front_alpha = np.clip(z / fade_front + 1.0, 0.0, 1.0)
+        track_alpha = back_alpha * front_alpha
+
+        # On-screen mask: must be in front AND visible
+        half = tpx / 2.0
         on_scr = (
-            z_ok &
+            in_front & (track_alpha > 0.01) &
             (sx + half >= 0) & (sx - half < self._canvas_w) &
             (sy + half >= 0) & (sy - half < self._canvas_h)
         )
 
-        vis   = np.where(on_scr)[0]
-        order = vis[np.argsort(-depth[vis])]
+        vis = np.where(on_scr)[0]
+        order = vis[np.argsort(-depth[vis])]  # back to front
 
+        # Cache for hover detection (float positions)
         self._frame_vis    = vis
-        self._frame_sx     = sx[vis]
-        self._frame_sy     = sy[vis]
-        self._frame_halfpx = half[vis]
+        self._frame_sx     = sx[vis].astype(np.float32)
+        self._frame_sy     = sy[vis].astype(np.float32)
+        self._frame_halfpx = half[vis].astype(np.float32)
 
-        # Auto-zoom
-        n_vis = len(vis)
-        if n_vis > self._target_on_screen * 1.1:
-            self._ppu *= 1.002
-        elif n_vis < self._target_on_screen * 0.9:
-            self._ppu *= 0.998
+        # Auto-zoom: proportional response — speed scales with error.
+        # Naturally accelerates when far from target, decelerates near it.
+        n_vis = max(len(vis), 1)
+        error = (n_vis - self._target_on_screen) / self._target_on_screen
+        zoom_rate = 0.06  # max ~6% per second at full error
+        self._ppu *= (1.0 + error * zoom_rate * dt)
         self._ppu = max(200.0, min(5000.0, self._ppu))
 
-        # Draw thumbnails
+        # ── Draw tracks as textured quads ─────────────────────────────────
         for i in order:
             tid = self._id_list[i]
-            sz  = int(tpx[i])
-            if sz < 2:
-                self._screen.set_at((int(sx[i]), int(sy[i])), (120, 120, 120))
+            tex = self._get_track_texture(tid)
+            if tex == 0:
                 continue
-            surf = self._get_cached_thumb(tid, sz)
-            if surf is not None:
-                h = surf.get_width() // 2
-                self._screen.blit(surf, (int(sx[i]) - h, int(sy[i]) - h))
-            else:
-                c = max(40, min(180, sz * 2))
-                pygame.draw.circle(
-                    self._screen, (c, c, c),
-                    (int(sx[i]), int(sy[i])), max(1, sz // 4),
-                )
+            h = float(tpx[i]) / 2.0
+            self._draw_quad(tex, float(sx[i]), float(sy[i]), h, h,
+                            float(track_alpha[i]), border=True)
 
-        # Heatmap stamp
-        center = (self._cx, self._cy)
-        if self._prev_center is not None and center != self._prev_center:
-            px, py = self._prev_center
-            rr     = self._heatmap_stamp_r
-            self._heatmap_surf.blit(
-                self._heatmap_stamp, (px - rr, py - rr)
-            )
-        self._prev_center = center
-
+        # ── Sphere ────────────────────────────────────────────────────────
         self._draw_sphere()
+
+        # ── Label ─────────────────────────────────────────────────────────
+        self._update_label_texture()
         self._draw_label()
+
+        # ── Tooltip ───────────────────────────────────────────────────────
         self._draw_tooltip()
 
         pygame.display.flip()
 
+    def _draw_sphere(self) -> None:
+        sphere_r = max(8, int(
+            self._sphere_base_radius * (0.7 + 0.3 * self._confidence)
+        ))
+        a = 0.7 + 0.3 * self._confidence
+        self._draw_quad(self._sphere_tex, self._cx, self._cy,
+                        float(sphere_r), float(sphere_r), a)
+
+    def _draw_label(self) -> None:
+        if self._label_tex == 0:
+            return
+        sphere_r = max(8, int(
+            self._sphere_base_radius * (0.7 + 0.3 * self._confidence)
+        ))
+        lx = self._cx
+        ly = self._cy + sphere_r + 10 + self._label_tex_h / 2.0
+        self._draw_quad(self._label_tex, lx,  ly,
+                        self._label_tex_w / 2.0, self._label_tex_h / 2.0)
+
+    def _draw_tooltip(self) -> None:
+        if self._hover_alpha <= 0.0 or self._hover_track_id is None:
+            return
+        # Render tooltip text to a temporary texture
+        row = self._db_rows.get(self._hover_track_id)
+        if not row:
+            return
+        lines: list[str] = []
+        if row["title"]:
+            lines.extend(self._wrap_text(row["title"], 20))
+        if row["artist"]:
+            lines.extend(self._wrap_text(row["artist"], 20))
+        if not lines:
+            return
+
+        surfs = [self._font.render(ln, True, (220, 220, 220)) for ln in lines]
+        lh = self._font.get_linesize()
+
+        # Album art + text
+        art_size = self._tooltip_size
+        w = max(art_size, max(s.get_width() for s in surfs) + 8)
+        h = art_size + 6 + len(surfs) * lh + 8
+
+        combined = pygame.Surface((w, h), pygame.SRCALPHA)
+        combined.fill((0, 0, 0, int(190 * self._hover_alpha)))
+
+        pil_img = self._pil_thumbs.get(self._hover_track_id)
+        if pil_img is not None:
+            resized = pil_img.resize((art_size, art_size), Image.LANCZOS)
+            arr = np.array(resized)
+            tip_surf = pygame.image.frombuffer(
+                arr.tobytes(), (art_size, art_size), "RGBA"
+            )
+            combined.blit(tip_surf, ((w - art_size) // 2, 0))
+
+        for j, s in enumerate(surfs):
+            combined.blit(s, (4, art_size + 6 + j * lh))
+
+        data = pygame.image.tostring(combined, "RGBA", True)
+        tex = self._upload_rgba(data, w, h)
+
+        mx, my = pygame.mouse.get_pos()
+        tx = min(float(mx) + 16, self._canvas_w - w - 4)
+        ty = max(4.0, float(my) - h - 16)
+        self._draw_quad(tex, tx + w / 2.0, ty + h / 2.0,
+                        w / 2.0, h / 2.0, self._hover_alpha)
+        glDeleteTextures([tex])
+
     def _handle_click(self, pos: tuple[int, int]) -> None:
-        """On click, write the hovered track ID to dj_override.txt."""
         if self._hover_track_id is None:
             return
         override_path = DATA_DIR / "dj_override.txt"
         try:
             override_path.write_text(self._hover_track_id)
             row = self._db_rows.get(self._hover_track_id)
-            name = f"{row['title']} — {row['artist']}" if row else self._hover_track_id
+            name = (f"{row['title']} — {row['artist']}"
+                    if row else self._hover_track_id)
             logger.info("Click → DJ override: %s", name)
         except Exception as e:
             logger.warning("Failed to write DJ override: %s", e)
-
-    def _draw_sphere(self) -> None:
-        sphere_r = max(8, int(
-            self._sphere_base_radius * (0.7 + 0.3 * self._confidence)
-        ))
-        sphere = self._get_sphere(sphere_r)
-        sphere.set_alpha(int(180 + 75 * self._confidence))
-        sr = sphere.get_width() // 2
-        self._screen.blit(sphere, (self._cx - sr, self._cy - sr))
-
-    def _draw_label(self) -> None:
-        if not self._label_text:
-            return
-        sphere_r = max(8, int(
-            self._sphere_base_radius * (0.7 + 0.3 * self._confidence)
-        ))
-        lines   = self._label_text.split("\n")
-        lh      = self._font.get_linesize()
-        block_h = len(lines) * lh
-        block_w = max(self._font.size(ln)[0] for ln in lines)
-        lx      = self._cx - block_w // 2
-        ly      = self._cy + sphere_r + 10
-        if ly + block_h >= self._canvas_h:
-            return
-        bg = pygame.Surface((block_w + 12, block_h + 8), pygame.SRCALPHA)
-        bg.fill((0, 0, 0, 160))
-        self._screen.blit(bg, (lx - 6, ly - 4))
-        for j, line in enumerate(lines):
-            ls = self._font.render(line, True, (220, 220, 220))
-            self._screen.blit(ls, (lx, ly + j * lh))
-
-    def _draw_tooltip(self) -> None:
-        if self._hover_alpha <= 0.0 or self._hover_track_id is None:
-            return
-        tip_surf = self._get_tooltip_surface(self._hover_track_id)
-        if tip_surf is None:
-            return
-        tip_surf.set_alpha(int(self._hover_alpha * 255))
-        mx, my = pygame.mouse.get_pos()
-        sz     = tip_surf.get_width()
-        lh     = self._font.get_linesize()
-        row    = self._db_rows.get(self._hover_track_id)
-        tip_lines: list[str] = []
-        if row:
-            if row["title"]:
-                tip_lines.extend(self._wrap_text(row["title"], 20))
-            if row["artist"]:
-                tip_lines.extend(self._wrap_text(row["artist"], 20))
-        block_h      = len(tip_lines) * lh
-        tip_w, tip_h = sz, sz + 6 + block_h
-        tx = min(mx + 16, self._canvas_w - tip_w - 4)
-        ty = max(4, my - tip_h - 16)
-        bg = pygame.Surface((tip_w + 8, tip_h + 8), pygame.SRCALPHA)
-        bg.fill((0, 0, 0, int(190 * self._hover_alpha)))
-        self._screen.blit(bg, (tx - 4, ty - 4))
-        self._screen.blit(tip_surf, (tx, ty))
-        for j, line in enumerate(tip_lines):
-            ls = self._font.render(line, True, (220, 220, 220))
-            ls.set_alpha(int(self._hover_alpha * 255))
-            self._screen.blit(ls, (tx, ty + sz + 6 + j * lh))

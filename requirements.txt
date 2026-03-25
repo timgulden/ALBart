@@ -7,6 +7,8 @@ faiss-cpu
 sounddevice
 numpy
 pygame
+PyOpenGL
+PyOpenGL-accelerate
 pyyaml
 tqdm
 librosa

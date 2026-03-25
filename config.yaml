@@ -53,9 +53,9 @@ runtime:
 
 neighborhood:
   k: 100                       # nearest neighbors used for PCA basis
-  base_thumb_px: 144           # thumbnail size at foreground (z=0)
+  base_thumb_px: 250           # thumbnail size at foreground (z=0)
   focal_length: 0.55           # perspective focal; smaller = faster size falloff with depth
-  z_near: 0.5                  # minimum z offset (prevents division issues)
+  z_near: 1.5                  # camera-to-sphere distance; larger = more foreground depth
   zoom: 5.0                    # zoom level; higher = fewer tracks visible (tune to taste)
   lerp_speed: 0.3              # position lerp speed (lower = slower, more contemplative)
   recompute_threshold: 0.50    # L2 distance from last projection embedding to count as "far"
