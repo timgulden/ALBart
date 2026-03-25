@@ -470,6 +470,8 @@ class NeighborhoodDisplay:
                 raise SystemExit(0)
             if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                 raise SystemExit(0)
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                self._handle_click(event.pos)
 
         self._tick(dt)
         self._screen.fill((0, 0, 0))
@@ -566,6 +568,19 @@ class NeighborhoodDisplay:
         self._draw_tooltip()
 
         pygame.display.flip()
+
+    def _handle_click(self, pos: tuple[int, int]) -> None:
+        """On click, write the hovered track ID to dj_override.txt."""
+        if self._hover_track_id is None:
+            return
+        override_path = DATA_DIR / "dj_override.txt"
+        try:
+            override_path.write_text(self._hover_track_id)
+            row = self._db_rows.get(self._hover_track_id)
+            name = f"{row['title']} — {row['artist']}" if row else self._hover_track_id
+            logger.info("Click → DJ override: %s", name)
+        except Exception as e:
+            logger.warning("Failed to write DJ override: %s", e)
 
     def _draw_sphere(self) -> None:
         sphere_r = max(8, int(
