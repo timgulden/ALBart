@@ -165,6 +165,9 @@ class NeighborhoodDisplay:
 
         font_size = max(14, self._canvas_w // 160)
         self._font = pygame.font.SysFont("Arial", font_size)
+        label_size = max(22, self._canvas_w // 80)
+        self._label_font = pygame.font.SysFont("Helvetica", label_size, bold=True)
+        self._label_font_shadow = pygame.font.SysFont("Helvetica", label_size, bold=True)
 
         # ── GL texture caches ─────────────────────────────────────────────
         self._gl_textures: dict[str, int] = {}  # tid → GL texture
@@ -314,14 +317,26 @@ class NeighborhoodDisplay:
         if not self._label_text:
             return
         lines = self._label_text.split("\n")
-        surfs = [self._font.render(ln, True, (220, 220, 220)) for ln in lines]
-        lh = self._font.get_linesize()
-        w = max(s.get_width() for s in surfs) + 12
-        h = len(surfs) * lh + 8
+        lh = self._label_font.get_linesize()
+        # Render text with shadow for readability
+        text_surfs = []
+        for ln in lines:
+            shadow = self._label_font_shadow.render(ln, True, (0, 0, 0))
+            fg = self._label_font.render(ln, True, (240, 240, 240))
+            w_line = fg.get_width() + 4
+            h_line = fg.get_height() + 2
+            combined_line = pygame.Surface((w_line, h_line), pygame.SRCALPHA)
+            # Draw shadow offset by 1-2px
+            combined_line.blit(shadow, (2, 2))
+            combined_line.blit(shadow, (1, 1))
+            combined_line.blit(fg, (0, 0))
+            text_surfs.append(combined_line)
+        w = max(s.get_width() for s in text_surfs) + 16
+        h = len(text_surfs) * lh + 12
         combined = pygame.Surface((w, h), pygame.SRCALPHA)
-        combined.fill((0, 0, 0, 160))
-        for j, s in enumerate(surfs):
-            combined.blit(s, (6 + (w - 12 - s.get_width()) // 2, 4 + j * lh))
+        combined.fill((0, 0, 0, 120))
+        for j, s in enumerate(text_surfs):
+            combined.blit(s, (8 + (w - 16 - s.get_width()) // 2, 6 + j * lh))
         data = pygame.image.tostring(combined, "RGBA", True)
         self._label_tex = self._upload_rgba(data, w, h)
         self._label_tex_w = w
@@ -574,8 +589,14 @@ class NeighborhoodDisplay:
         self._ppu *= (1.0 + error * zoom_rate * dt)
         self._ppu = max(200.0, min(5000.0, self._ppu))
 
-        # ── Draw tracks as textured quads ─────────────────────────────────
+        # ── Draw tracks + glow frame layered at Z=0 ─────────────────────
+        # Background tracks (z > 0) first, then glow frame, then foreground
+        glow_drawn = False
         for i in order:
+            # Insert glow frame at the Z=0 boundary
+            if not glow_drawn and z[i] <= 0:
+                self._draw_sphere()
+                glow_drawn = True
             tid = self._id_list[i]
             tex = self._get_track_texture(tid)
             if tex == 0:
@@ -583,9 +604,8 @@ class NeighborhoodDisplay:
             h = float(tpx[i]) / 2.0
             self._draw_quad(tex, float(sx[i]), float(sy[i]), h, h,
                             float(track_alpha[i]), border=True)
-
-        # ── Sphere ────────────────────────────────────────────────────────
-        self._draw_sphere()
+        if not glow_drawn:
+            self._draw_sphere()
 
         # ── Label ─────────────────────────────────────────────────────────
         self._update_label_texture()
@@ -597,12 +617,104 @@ class NeighborhoodDisplay:
         pygame.display.flip()
 
     def _draw_sphere(self) -> None:
-        sphere_r = max(8, int(
-            self._sphere_base_radius * (0.7 + 0.3 * self._confidence)
-        ))
-        a = 0.7 + 0.3 * self._confidence
-        self._draw_quad(self._sphere_tex, self._cx, self._cy,
-                        float(sphere_r), float(sphere_r), a)
+        """Draw a glowing hollow square frame around the central cover."""
+        scale_at_z0 = self._focal_length / (self._z_near + self._focal_length)
+        frame_half = float(self._base_thumb_px) * scale_at_z0 * 1.5 / 2.0 + 4.0
+        a = 0.35 + 0.25 * self._confidence
+        glow = 25.0  # glow spread in pixels
+        r, g, b = 0.45, 0.5, 1.0  # blue-white glow color
+
+        cx, cy = self._cx, self._cy
+        L = cx - frame_half   # inner left
+        R = cx + frame_half   # inner right
+        T = cy - frame_half   # inner top
+        B = cy + frame_half   # inner bottom
+
+        glDisable(GL_TEXTURE_2D)
+        glBegin(GL_QUADS)
+
+        # Top edge glow (inner bright → outer transparent)
+        glColor4f(r, g, b, a);   glVertex2f(L, T)
+        glColor4f(r, g, b, a);   glVertex2f(R, T)
+        glColor4f(r, g, b, 0.0); glVertex2f(R, T - glow)
+        glColor4f(r, g, b, 0.0); glVertex2f(L, T - glow)
+
+        # Bottom edge glow
+        glColor4f(r, g, b, a);   glVertex2f(L, B)
+        glColor4f(r, g, b, a);   glVertex2f(R, B)
+        glColor4f(r, g, b, 0.0); glVertex2f(R, B + glow)
+        glColor4f(r, g, b, 0.0); glVertex2f(L, B + glow)
+
+        # Left edge glow
+        glColor4f(r, g, b, a);   glVertex2f(L, T)
+        glColor4f(r, g, b, a);   glVertex2f(L, B)
+        glColor4f(r, g, b, 0.0); glVertex2f(L - glow, B)
+        glColor4f(r, g, b, 0.0); glVertex2f(L - glow, T)
+
+        # Right edge glow
+        glColor4f(r, g, b, a);   glVertex2f(R, T)
+        glColor4f(r, g, b, a);   glVertex2f(R, B)
+        glColor4f(r, g, b, 0.0); glVertex2f(R + glow, B)
+        glColor4f(r, g, b, 0.0); glVertex2f(R + glow, T)
+
+        # Corner glow (triangle fans approximated as quads)
+        # Top-left
+        glColor4f(r, g, b, a);   glVertex2f(L, T)
+        glColor4f(r, g, b, 0.0); glVertex2f(L - glow, T)
+        glColor4f(r, g, b, 0.0); glVertex2f(L - glow, T - glow)
+        glColor4f(r, g, b, 0.0); glVertex2f(L, T - glow)
+        # Top-right
+        glColor4f(r, g, b, a);   glVertex2f(R, T)
+        glColor4f(r, g, b, 0.0); glVertex2f(R, T - glow)
+        glColor4f(r, g, b, 0.0); glVertex2f(R + glow, T - glow)
+        glColor4f(r, g, b, 0.0); glVertex2f(R + glow, T)
+        # Bottom-left
+        glColor4f(r, g, b, a);   glVertex2f(L, B)
+        glColor4f(r, g, b, 0.0); glVertex2f(L, B + glow)
+        glColor4f(r, g, b, 0.0); glVertex2f(L - glow, B + glow)
+        glColor4f(r, g, b, 0.0); glVertex2f(L - glow, B)
+        # Bottom-right
+        glColor4f(r, g, b, a);   glVertex2f(R, B)
+        glColor4f(r, g, b, 0.0); glVertex2f(R + glow, B)
+        glColor4f(r, g, b, 0.0); glVertex2f(R + glow, B + glow)
+        glColor4f(r, g, b, 0.0); glVertex2f(R, B + glow)
+
+        glEnd()
+
+        # Thin crisp inner frame
+        glColor4f(0.7, 0.73, 1.0, a * 0.5)
+        self._draw_rect_outline(cx, cy, frame_half, frame_half, 1.0)
+
+        glEnable(GL_TEXTURE_2D)
+
+    def _draw_rect_outline(self, cx: float, cy: float,
+                           half_w: float, half_h: float,
+                           thickness: float) -> None:
+        """Draw a rectangular outline using GL quads."""
+        l, r = cx - half_w, cx + half_w
+        t, b = cy - half_h, cy + half_h
+        glBegin(GL_QUADS)
+        # Top edge
+        glVertex2f(l - thickness, t - thickness)
+        glVertex2f(r + thickness, t - thickness)
+        glVertex2f(r + thickness, t)
+        glVertex2f(l - thickness, t)
+        # Bottom edge
+        glVertex2f(l - thickness, b)
+        glVertex2f(r + thickness, b)
+        glVertex2f(r + thickness, b + thickness)
+        glVertex2f(l - thickness, b + thickness)
+        # Left edge
+        glVertex2f(l - thickness, t)
+        glVertex2f(l, t)
+        glVertex2f(l, b)
+        glVertex2f(l - thickness, b)
+        # Right edge
+        glVertex2f(r, t)
+        glVertex2f(r + thickness, t)
+        glVertex2f(r + thickness, b)
+        glVertex2f(r, b)
+        glEnd()
 
     def _draw_label(self) -> None:
         if self._label_tex == 0:
