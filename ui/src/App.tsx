@@ -373,7 +373,7 @@ function App() {
             <div style={{ marginTop: 16 }}>
               <Slider
                 label="Mood Strictness"
-                value={moodThreshold} min={0.15} max={0.55} step={0.05}
+                value={moodThreshold} min={0.15} max={0.70} step={0.05}
                 leftLabel="loose (most tracks)"
                 rightLabel="strict (few tracks)"
                 onChange={updateMoodThreshold}
