@@ -65,7 +65,10 @@ class DJ:
         self.hop_interval = hop_interval_minutes * 60.0  # seconds
         self.hop_multiplier = hop_multiplier
         self._mode = mode  # "exact" or "listen"
-        self._temperature = temperature  # 0.0 = nearest only, 1.0 = wide exploration
+        # Song temperature = K candidates (1-50). Set temperature = hop multiplier.
+        self._song_k = max(1, min(50, int(temperature * NORMAL_HOP_K)
+                                  if temperature <= 1.0 else int(temperature)))
+        self._temperature = temperature  # keep for backward compat
 
         # ── Load embeddings + metadata ────────────────────────────────────
         logger.info("Loading embeddings and metadata...")
@@ -125,13 +128,14 @@ class DJ:
         # mood_embs: (M, 512) CLAP text embeddings defining "in-bounds" space
         # If set, candidates must have cosine sim > threshold to at least one
         self._mood_embs: np.ndarray | None = None
-        self._mood_threshold: float = 0.15  # cosine sim threshold
+        self._mood_text: str | None = None
+        self._mood_descriptors: list[str] = []
+        self._mood_threshold: float = 0.15
         if mood:
             self._setup_mood(mood)
 
-        logger.info("Temperature: %.2f  (%.0f candidates per hop)",
-                    self._temperature,
-                    max(3, int(NORMAL_HOP_K * self._temperature)))
+        logger.info("Song K=%d  Set multiplier=%.1f×",
+                    self._song_k, self.hop_multiplier)
 
     def _setup_mood(self, mood_text: str) -> None:
         """Convert free-text mood description into CLAP embeddings for filtering.
@@ -142,6 +146,7 @@ class DJ:
         import anthropic
         from albart.utils import DATA_DIR
 
+        self._mood_text = mood_text
         logger.info("Processing mood: %s", mood_text)
 
         # Step 1: Claude expands the mood into genre descriptors
@@ -167,6 +172,7 @@ class DJ:
             ln.strip() for ln in response.content[0].text.strip().split("\n")
             if ln.strip()
         ]
+        self._mood_descriptors = lines
         logger.info("Mood descriptors (%d):", len(lines))
         for ln in lines:
             logger.info("  %s", ln)
@@ -315,9 +321,7 @@ class DJ:
         Mood filter rejects tracks outside the mood region.
         Artist penalty avoids same-artist runs.
         """
-        # Temperature scales the candidate pool: 0 → 1 track, 1.0 → 20
-        k = max(1, int(NORMAL_HOP_K * self._temperature)) if self._temperature > 0 else 1
-        candidates = self._find_nearest_unplayed(current_emb, k=k)
+        candidates = self._find_nearest_unplayed(current_emb, k=self._song_k)
         if not candidates:
             logger.warning("No unplayed tracks found nearby!")
             return None
@@ -337,11 +341,10 @@ class DJ:
         tids = [c[0] for c in candidates]
         dists = np.array([c[1] for c in candidates])
 
-        # Temperature also sharpens/softens the distance weighting
-        # 0 → deterministic (nearest only), low → sharp, high → flat
-        if self._temperature <= 0:
-            return tids[0]  # always pick nearest
-        sharpness = 1.0 / self._temperature
+        # With K=1, always pick nearest (deterministic)
+        if self._song_k <= 1:
+            return tids[0]
+        sharpness = 1.0  # 1/distance weighting; K controls exploration width
         weights = (1.0 / np.maximum(dists, 1e-8)) ** sharpness
 
         # Penalize same artist as recent tracks
