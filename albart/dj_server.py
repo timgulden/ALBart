@@ -183,15 +183,48 @@ def set_set_distance(req: SetDistanceUpdate) -> dict:
     return {"set_distance": _dj.hop_multiplier}
 
 
+@app.post("/api/interpret")
+def interpret_mood(req: MoodUpdate) -> dict:
+    """Call Claude to expand mood text into descriptors. No DJ needed."""
+    import anthropic
+
+    try:
+        client = anthropic.Anthropic()
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=1024,
+            messages=[{
+                "role": "user",
+                "content": (
+                    "I'm setting up a music DJ that should play tracks matching "
+                    "a specific mood. Given this description:\n\n"
+                    f'"{req.mood}"\n\n'
+                    "Generate exactly 20 short music genre/mood descriptors "
+                    "(2-5 words each) that define what kind of music should play. "
+                    "Include both positive descriptors (what TO play) and avoid "
+                    "descriptors prefixed with 'NOT:' for what to avoid.\n\n"
+                    "Return ONLY the list, one per line, no numbering."
+                ),
+            }],
+        )
+        lines = [
+            ln.strip() for ln in response.content[0].text.strip().split("\n")
+            if ln.strip()
+        ]
+        return {"descriptors": lines, "mood": req.mood}
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @app.put("/api/mood")
-def set_mood(req: MoodUpdate) -> dict:
+def apply_mood(req: MoodUpdate) -> dict:
+    """Apply mood filter to the running DJ."""
     if _dj is None:
-        return {"error": "No active session"}
+        return {"error": "No active session — start the DJ first"}
     try:
         _dj._setup_mood(req.mood)
         return {
-            "status": "mood updated",
-            "mood": req.mood,
+            "status": "mood applied",
             "descriptors": _dj._mood_descriptors,
         }
     except Exception as e:

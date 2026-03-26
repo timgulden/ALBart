@@ -29,18 +29,27 @@ function App() {
   const [searchQuery, setSearchQuery] = useState('')
   const [searchResults, setSearchResults] = useState<TrackInfo[]>([])
   const [moodPending, setMoodPending] = useState(false)
+  const [moodDescriptors, setMoodDescriptors] = useState<string[]>([])
+  const [moodApplied, setMoodApplied] = useState(false)
   const [error, setError] = useState('')
 
   // Poll status
   useEffect(() => {
-    const poll = setInterval(async () => {
-      try {
-        const res = await fetch(`${API}/status`)
-        const data: Status = await res.json()
-        setStatus(data)
-      } catch { /* server not running */ }
-    }, 2000)
-    return () => clearInterval(poll)
+    let active = true
+    const poll = async () => {
+      while (active) {
+        try {
+          const res = await fetch(`${API}/status`)
+          if (active && res.ok) {
+            const data: Status = await res.json()
+            setStatus(data)
+          }
+        } catch { /* server not running */ }
+        await new Promise(r => setTimeout(r, 2000))
+      }
+    }
+    poll()
+    return () => { active = false }
   }, [])
 
   const startSession = useCallback(async () => {
@@ -87,9 +96,30 @@ function App() {
     })
   }, [])
 
-  const updateMood = useCallback(async () => {
+  const interpretMood = useCallback(async () => {
     if (!mood.trim()) return
     setMoodPending(true)
+    setMoodApplied(false)
+    setError('')
+    try {
+      const res = await fetch(`${API}/interpret`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mood }),
+      })
+      const data = await res.json()
+      if (data.error) {
+        setError(data.error)
+      } else if (data.descriptors) {
+        setMoodDescriptors(data.descriptors)
+      }
+    } catch {
+      setError('Interpret failed — is ANTHROPIC_API_KEY set?')
+    }
+    setMoodPending(false)
+  }, [mood])
+
+  const applyMood = useCallback(async () => {
     setError('')
     try {
       const res = await fetch(`${API}/mood`, {
@@ -98,11 +128,14 @@ function App() {
         body: JSON.stringify({ mood }),
       })
       const data = await res.json()
-      if (data.error) setError(data.error)
+      if (data.error) {
+        setError(data.error)
+      } else {
+        setMoodApplied(true)
+      }
     } catch {
-      setError('Mood update failed')
+      setError('Apply mood failed — is the DJ running?')
     }
-    setMoodPending(false)
   }, [mood])
 
   const playNow = useCallback(async (trackId: string) => {
@@ -117,7 +150,6 @@ function App() {
     setSearchResults([])
   }, [])
 
-  // Search on Enter
   const doSearch = useCallback(async () => {
     if (searchQuery.length < 2) return
     try {
@@ -130,69 +162,28 @@ function App() {
 
   return (
     <div style={{
-      maxWidth: 900, margin: '30px auto',
+      maxWidth: 960, margin: '30px auto',
       fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
       color: '#e0e0e0', padding: '24px',
     }}>
-      <h1 style={{ fontSize: 28, fontWeight: 700, marginBottom: 20, color: '#fff' }}>
+      <h1 style={{ fontSize: 32, fontWeight: 700, marginBottom: 24, color: '#fff' }}>
         ALBart DJ
       </h1>
 
-      <div style={{ display: 'flex', gap: 20 }}>
-        {/* ── Left column: Mood ── */}
-        <div style={{ flex: '0 0 320px' }}>
-          <Card>
-            <Label>Mood</Label>
-            <textarea
-              rows={3}
-              placeholder="chill dinner party, jazz, downtempo, no opera..."
-              value={mood} onChange={e => setMood(e.target.value)}
-              style={{ ...inputStyle, width: '100%', resize: 'vertical' }}
-            />
-            <button
-              onClick={updateMood} disabled={moodPending}
-              style={{ ...btnStyle(moodPending ? '#555' : '#2ecc71'), marginTop: 8, width: '100%' }}
-            >
-              {moodPending ? 'Processing...' : 'Apply Mood'}
-            </button>
-
-            {/* Mood descriptors from Claude */}
-            {status && status.mood_descriptors.length > 0 && (
-              <div style={{ marginTop: 12 }}>
-                <Label>Active Descriptors</Label>
-                <div style={{
-                  fontSize: 12, color: '#8890a8', lineHeight: 1.8,
-                  padding: '8px 0',
-                }}>
-                  {status.mood_descriptors.map((d, i) => (
-                    <span key={i} style={{
-                      display: 'inline-block', background: d.toUpperCase().startsWith('NOT:') ? '#3d1f1f' : '#1f2d3d',
-                      borderRadius: 4, padding: '2px 8px', margin: '2px 4px 2px 0',
-                      color: d.toUpperCase().startsWith('NOT:') ? '#e88' : '#8ab4f8',
-                      fontSize: 11,
-                    }}>
-                      {d}
-                    </span>
-                  ))}
-                </div>
-              </div>
-            )}
-          </Card>
-        </div>
-
-        {/* ── Right column: Controls + Status ── */}
+      <div style={{ display: 'flex', gap: 24 }}>
+        {/* ── Left column: Controls + Status ── */}
         <div style={{ flex: 1 }}>
           {/* Now Playing */}
           {status?.current_track && (
             <Card accent>
-              <div style={{ fontSize: 11, color: '#888', marginBottom: 4 }}>Now Playing</div>
-              <div style={{ fontSize: 20, fontWeight: 600, color: '#fff' }}>
+              <div style={{ fontSize: 13, color: '#888', marginBottom: 4 }}>Now Playing</div>
+              <div style={{ fontSize: 24, fontWeight: 600, color: '#fff' }}>
                 {status.current_track.title}
               </div>
-              <div style={{ fontSize: 14, color: '#aaa', marginTop: 2 }}>
+              <div style={{ fontSize: 17, color: '#aaa', marginTop: 4 }}>
                 {status.current_track.artist}
               </div>
-              <div style={{ fontSize: 12, color: '#666', marginTop: 8 }}>
+              <div style={{ fontSize: 14, color: '#666', marginTop: 10 }}>
                 {status.played_count} / {status.total_tracks} played
               </div>
             </Card>
@@ -200,7 +191,7 @@ function App() {
 
           {/* Start / Stop / Skip */}
           <Card>
-            <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+            <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
               {!isPlaying ? (
                 <>
                   <input
@@ -218,7 +209,6 @@ function App() {
               )}
             </div>
 
-            {/* Next Song Temperature */}
             <Slider
               label="Next Song Temperature"
               value={songK} min={1} max={50} step={1}
@@ -227,7 +217,6 @@ function App() {
               onChange={updateSongK}
             />
 
-            {/* Next Set Temperature */}
             <Slider
               label="Next Set Temperature"
               value={setDist} min={1} max={20} step={0.5}
@@ -250,11 +239,11 @@ function App() {
               <button onClick={doSearch} style={btnStyle('#4a6cf7')}>Search</button>
             </div>
             {searchResults.length > 0 && (
-              <div style={{ marginTop: 8 }}>
+              <div style={{ marginTop: 10 }}>
                 {searchResults.map(t => (
                   <div key={t.track_id} style={{
                     display: 'flex', alignItems: 'center', gap: 8,
-                    padding: '6px 0', borderBottom: '1px solid #222', fontSize: 13,
+                    padding: '8px 0', borderBottom: '1px solid #222', fontSize: 15,
                   }}>
                     <span style={{ flex: 1 }}>
                       {t.title} — <span style={{ color: '#888' }}>{t.artist}</span>
@@ -270,12 +259,12 @@ function App() {
           </Card>
 
           {/* History */}
-          {status && status.history.length > 1 && (
+          {status?.history && status.history.length > 1 && (
             <Card>
               <Label>Recent History</Label>
               {status.history.slice(1, 12).map((t, i) => (
                 <div key={`${t.track_id}-${i}`} style={{
-                  padding: '3px 0', fontSize: 13, color: '#999',
+                  padding: '4px 0', fontSize: 15, color: '#999',
                   borderBottom: '1px solid #1a1a2e',
                 }}>
                   {t.title} — {t.artist}
@@ -284,12 +273,75 @@ function App() {
             </Card>
           )}
         </div>
+
+        {/* ── Right column: Mood ── */}
+        <div style={{ flex: '0 0 340px' }}>
+          <Card>
+            <Label>Mood</Label>
+            <textarea
+              rows={3}
+              placeholder="chill dinner party, jazz, downtempo, no opera..."
+              value={mood} onChange={e => setMood(e.target.value)}
+              style={{ ...inputStyle, width: '100%', resize: 'vertical' }}
+            />
+            <button
+              onClick={interpretMood} disabled={moodPending}
+              style={{
+                ...btnStyle(moodPending ? '#555' : '#4a6cf7'),
+                marginTop: 10, width: '100%',
+              }}
+            >
+              {moodPending ? 'Interpreting...' : 'Interpret'}
+            </button>
+
+            {/* Claude's interpretation */}
+            {moodDescriptors.length > 0 && (
+              <div style={{
+                marginTop: 14, padding: 14,
+                background: '#0f1729', borderRadius: 8,
+                border: '1px solid #2a2f45',
+              }}>
+                <div style={{ fontSize: 13, color: '#667', marginBottom: 8 }}>
+                  Claude's interpretation:
+                </div>
+                <div style={{ lineHeight: 2.0 }}>
+                  {moodDescriptors.map((d, i) => {
+                    const isNot = d.toUpperCase().startsWith('NOT:')
+                    return (
+                      <span key={i} style={{
+                        display: 'inline-block',
+                        background: isNot ? '#3d1f1f' : '#1f2d3d',
+                        borderRadius: 5,
+                        padding: '3px 10px',
+                        margin: '2px 4px 2px 0',
+                        color: isNot ? '#e88' : '#8ab4f8',
+                        fontSize: 13,
+                      }}>
+                        {d}
+                      </span>
+                    )
+                  })}
+                </div>
+                <button
+                  onClick={applyMood}
+                  disabled={moodApplied}
+                  style={{
+                    ...btnStyle(moodApplied ? '#555' : '#2ecc71'),
+                    marginTop: 12, width: '100%',
+                  }}
+                >
+                  {moodApplied ? 'Applied ✓' : 'Apply Mood'}
+                </button>
+              </div>
+            )}
+          </Card>
+        </div>
       </div>
 
       {error && (
         <div style={{
-          marginTop: 16, padding: '10px 16px', borderRadius: 8,
-          background: '#e74c3c22', color: '#e74c3c', fontSize: 13,
+          marginTop: 16, padding: '12px 18px', borderRadius: 8,
+          background: '#e74c3c22', color: '#e74c3c', fontSize: 15,
         }}>
           {error}
         </div>
@@ -298,12 +350,12 @@ function App() {
   )
 }
 
-// ── Reusable components ─────────────────────────────────────────────────
+// ── Components ──────────────────────────────────────────────────────────
 
 function Card({ children, accent }: { children: React.ReactNode; accent?: boolean }) {
   return (
     <div style={{
-      background: '#16213e', borderRadius: 12, padding: 20, marginBottom: 16,
+      background: '#16213e', borderRadius: 12, padding: 22, marginBottom: 18,
       borderLeft: accent ? '4px solid #4a6cf7' : 'none',
     }}>
       {children}
@@ -312,28 +364,44 @@ function Card({ children, accent }: { children: React.ReactNode; accent?: boolea
 }
 
 function Label({ children }: { children: React.ReactNode }) {
-  return <div style={{ fontSize: 13, color: '#888', marginBottom: 6 }}>{children}</div>
+  return <div style={{ fontSize: 15, color: '#888', marginBottom: 8 }}>{children}</div>
 }
 
 function Slider({ label, value, min, max, step, leftLabel, rightLabel, onChange }: {
   label: string; value: number; min: number; max: number; step: number
   leftLabel: string; rightLabel: string; onChange: (v: number) => void
 }) {
+  // Position the value indicator over the slider thumb
+  const pct = ((value - min) / (max - min)) * 100
+  const displayVal = Number.isInteger(step) ? String(value) : value.toFixed(1)
+
   return (
-    <div style={{ marginBottom: 14 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
-        <Label>{label}</Label>
-        <span style={{ fontSize: 13, color: '#aaa', fontWeight: 600 }}>
-          {Number.isInteger(step) ? value : value.toFixed(1)}
-        </span>
+    <div style={{ marginBottom: 18 }}>
+      <Label>{label}</Label>
+      <div style={{ position: 'relative', marginBottom: 4 }}>
+        <input
+          type="range" min={min} max={max} step={step}
+          value={value}
+          onChange={e => onChange(parseFloat(e.target.value))}
+          style={{ width: '100%', accentColor: '#4a6cf7' }}
+        />
+        {/* Value bubble centered over the thumb */}
+        <div style={{
+          position: 'absolute',
+          top: -22,
+          left: `calc(${pct}% - 16px)`,
+          fontSize: 14,
+          fontWeight: 700,
+          color: '#fff',
+          background: '#4a6cf7',
+          borderRadius: 4,
+          padding: '1px 8px',
+          pointerEvents: 'none',
+        }}>
+          {displayVal}
+        </div>
       </div>
-      <input
-        type="range" min={min} max={max} step={step}
-        value={value}
-        onChange={e => onChange(parseFloat(e.target.value))}
-        style={{ width: '100%', accentColor: '#4a6cf7' }}
-      />
-      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: '#555' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: '#555' }}>
         <span>{leftLabel}</span>
         <span>{rightLabel}</span>
       </div>
@@ -344,23 +412,23 @@ function Slider({ label, value, min, max, step, leftLabel, rightLabel, onChange 
 // ── Styles ───────────────────────────────────────────────────────────────
 
 const inputStyle: React.CSSProperties = {
-  padding: '8px 12px', borderRadius: 8,
+  padding: '10px 14px', borderRadius: 8,
   border: '1px solid #333', background: '#0f1729',
-  color: '#fff', fontSize: 14,
+  color: '#fff', fontSize: 16,
 }
 
 function btnStyle(color: string): React.CSSProperties {
   return {
-    padding: '8px 16px', borderRadius: 8, border: 'none',
-    background: color, color: '#fff', fontSize: 14,
+    padding: '10px 20px', borderRadius: 8, border: 'none',
+    background: color, color: '#fff', fontSize: 16,
     fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap',
   }
 }
 
 function smallBtn(color: string): React.CSSProperties {
   return {
-    padding: '3px 10px', borderRadius: 6, border: 'none',
-    background: color, color: '#fff', fontSize: 11,
+    padding: '5px 12px', borderRadius: 6, border: 'none',
+    background: color, color: '#fff', fontSize: 13,
     fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap',
   }
 }
