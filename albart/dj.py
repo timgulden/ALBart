@@ -325,14 +325,19 @@ class DJ:
             logger.warning("No unplayed tracks found nearby!")
             return None
 
-        # Mood filter: reject candidates outside the mood region
-        if self._mood_embs is not None:
+        # Mood filter: reject candidates outside the mood region.
+        # Widen the search progressively if needed.
+        if self._mood_embs is not None or self._mood_embs_neg is not None:
             candidates = [(t, d) for t, d in candidates if self._is_in_mood(t)]
             if not candidates:
-                logger.warning("No in-mood tracks nearby — relaxing filter")
-                candidates = self._find_nearest_unplayed(current_emb, k=k * 3)
-                candidates = [(t, d) for t, d in candidates if self._is_in_mood(t)]
+                for wider_k in [50, 200, 500, self._N]:
+                    logger.info("Widening mood search to k=%d", wider_k)
+                    wider = self._find_nearest_unplayed(current_emb, k=wider_k)
+                    candidates = [(t, d) for t, d in wider if self._is_in_mood(t)]
+                    if candidates:
+                        break
             if not candidates:
+                logger.warning("No in-mood tracks in entire library!")
                 return None
 
         recent_artists = self._recent_artists(3)
@@ -388,12 +393,15 @@ class DJ:
 
         # Find nearest unplayed to the target point, filtered by mood
         candidates = self._find_nearest_unplayed(target, k=NORMAL_HOP_K)
-        if self._mood_embs is not None:
+        if self._mood_embs is not None or self._mood_embs_neg is not None:
             candidates = [(t, d) for t, d in candidates if self._is_in_mood(t)]
             if not candidates:
-                # Widen search if mood filter rejected everything
-                candidates = self._find_nearest_unplayed(target, k=NORMAL_HOP_K * 3)
-                candidates = [(t, d) for t, d in candidates if self._is_in_mood(t)]
+                for wider_k in [50, 200, 500]:
+                    logger.info("Long hop: widening mood search to k=%d", wider_k)
+                    wider = self._find_nearest_unplayed(target, k=wider_k)
+                    candidates = [(t, d) for t, d in wider if self._is_in_mood(t)]
+                    if candidates:
+                        break
         if not candidates:
             return self._pick_normal_hop(emb_curr)
 
