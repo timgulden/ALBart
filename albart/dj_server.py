@@ -93,6 +93,7 @@ class StatusResponse(BaseModel):
     mood_text: Optional[str] = None
     mood_descriptors: list[str]
     mood_threshold: float
+    mood_in_count: int
     played_count: int
     total_tracks: int
     history: list[TrackInfo]
@@ -123,7 +124,7 @@ def get_status() -> StatusResponse:
     if _dj is None:
         return StatusResponse(
             playing=False, song_k=10, set_distance=5.0,
-            mood_descriptors=[], mood_threshold=0.35,
+            mood_descriptors=[], mood_threshold=0.35, mood_in_count=0,
             played_count=0, total_tracks=0, history=[],
         )
 
@@ -141,6 +142,7 @@ def get_status() -> StatusResponse:
         mood_text=_dj._mood_text,
         mood_descriptors=_dj._mood_descriptors,
         mood_threshold=_dj._mood_threshold,
+        mood_in_count=int(_dj._mood_mask.sum()) if _dj._mood_mask is not None else _dj._N,
         played_count=len(_dj._played),
         total_tracks=_dj._N,
         history=history,

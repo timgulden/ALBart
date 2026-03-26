@@ -378,6 +378,14 @@ function App() {
                 rightLabel="strict (few tracks)"
                 onChange={updateMoodThreshold}
               />
+              {status && (
+                <div style={{ fontSize: 13, color: '#888', textAlign: 'center', marginTop: -8 }}>
+                  {status.mood_in_count}/{status.total_tracks} tracks in-mood
+                  ({status.total_tracks > 0
+                    ? Math.round(100 * status.mood_in_count / status.total_tracks)
+                    : 0}%)
+                </div>
+              )}
             </div>
           </Card>
 
