@@ -18,5 +18,9 @@ env/
 # macOS
 .DS_Store
 
+# Node
+node_modules/
+ui/dist/
+
 # Secrets / env
 .env

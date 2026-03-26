@@ -17,3 +17,5 @@ joblib
 scikit-learn
 shapely
 anthropic
+fastapi
+uvicorn
