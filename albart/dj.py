@@ -128,6 +128,7 @@ class DJ:
         # mood_embs: (M, 512) CLAP text embeddings defining "in-bounds" space
         # If set, candidates must have cosine sim > threshold to at least one
         self._mood_embs: np.ndarray | None = None
+        self._mood_embs_neg: np.ndarray | None = None
         self._mood_text: str | None = None
         self._mood_descriptors: list[str] = []
         self._mood_threshold: float = 0.35  # cosine sim; higher = stricter
@@ -177,28 +178,54 @@ class DJ:
         for ln in lines:
             logger.info("  %s", ln)
 
-        # Step 2: Embed descriptors directly via CLAP text inference
+        # Step 2: Embed descriptors via CLAP text inference
         positive = [ln for ln in lines if not ln.upper().startswith("NOT:")]
+        negative = [ln[4:].strip() for ln in lines if ln.upper().startswith("NOT:")]
+
         if positive:
             self._mood_embs = embed_texts(positive)
-            logger.info("Mood filter active: %d descriptors embedded (%d dims)",
-                        len(positive), self._mood_embs.shape[1])
+            logger.info("Mood filter: %d positive descriptors embedded",
+                        len(positive))
         else:
             self._mood_embs = None
-            logger.warning("No positive mood descriptors — filter disabled")
+
+        if negative:
+            self._mood_embs_neg = embed_texts(negative)
+            logger.info("Mood filter: %d negative descriptors embedded",
+                        len(negative))
+        else:
+            self._mood_embs_neg = None
+
+        if self._mood_embs is None and self._mood_embs_neg is None:
+            logger.warning("No mood descriptors — filter disabled")
 
     def _is_in_mood(self, tid: str) -> bool:
-        """Check if a track is within the mood-defined region."""
-        if self._mood_embs is None:
-            return True  # no filter = everything allowed
+        """Check if a track is within the mood-defined region.
+
+        A track passes if:
+          1. It matches at least one positive descriptor (above threshold)
+          2. It does NOT match any negative descriptor (above threshold)
+        """
+        if self._mood_embs is None and self._mood_embs_neg is None:
+            return True
         emb = self._get_embedding(tid)
         if emb is None:
             return True
-        # L2-normalize for cosine similarity
         emb_norm = emb / (np.linalg.norm(emb) + 1e-8)
-        # Max cosine sim to any mood descriptor
-        sims = self._mood_embs @ emb_norm
-        return float(np.max(sims)) > self._mood_threshold
+
+        # Must match at least one positive descriptor
+        if self._mood_embs is not None:
+            pos_sims = self._mood_embs @ emb_norm
+            if float(np.max(pos_sims)) < self._mood_threshold:
+                return False
+
+        # Must NOT match any negative descriptor
+        if self._mood_embs_neg is not None:
+            neg_sims = self._mood_embs_neg @ emb_norm
+            if float(np.max(neg_sims)) > self._mood_threshold:
+                return False
+
+        return True
 
     def _start_udp_listener(self, port: int) -> None:
         """Background thread that receives embeddings from the main engine."""
