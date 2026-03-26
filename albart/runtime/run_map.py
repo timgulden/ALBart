@@ -35,10 +35,15 @@ logger = logging.getLogger(__name__)
 
 # Canvas sizes for each mode
 _MODE_CANVAS: dict[str, tuple[int, int]] = {
+    "1080p": (1920, 1080),
+    "4k": (3840, 2160),
+    # Legacy aliases
     "half": (1920, 1080),
     "full": (3840, 2160),
 }
 _MODE_THUMB: dict[str, int] = {
+    "1080p": 10,
+    "4k": 20,
     "half": 10,
     "full": 20,
 }
@@ -51,8 +56,8 @@ def main() -> None:
         help="Visualization: neighborhood (3D perspective, default) or umap (2D global map)",
     )
     parser.add_argument(
-        "--mode", choices=["half", "full"], default="half",
-        help="Display mode: half=1080p (default), full=4K",
+        "--mode", choices=["1080p", "4k", "half", "full"], default="1080p",
+        help="Display mode: 1080p (default), 4k",
     )
     parser.add_argument(
         "--port", type=int, default=57001,
