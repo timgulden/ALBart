@@ -435,7 +435,7 @@ function Slider({ label, value, min, max, step, leftLabel, rightLabel, onChange 
   label: string; value: number; min: number; max: number; step: number
   leftLabel: string; rightLabel: string; onChange: (v: number) => void
 }) {
-  const displayVal = Number.isInteger(step) ? String(value) : value.toFixed(1)
+  const displayVal = Number.isInteger(step) ? String(value) : value.toFixed(2)
 
   return (
     <div style={{ marginBottom: 18 }}>
