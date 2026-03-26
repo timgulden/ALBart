@@ -185,7 +185,10 @@ def set_set_distance(req: SetDistanceUpdate) -> dict:
 
 @app.post("/api/interpret")
 def interpret_mood(req: MoodUpdate) -> dict:
-    """Call Claude to expand mood text into descriptors. No DJ needed."""
+    """Call Claude to expand mood text into descriptors. No DJ needed.
+
+    Also pre-warms the CLAP text embedder so Apply is fast.
+    """
     import anthropic
 
     try:
@@ -211,6 +214,13 @@ def interpret_mood(req: MoodUpdate) -> dict:
             ln.strip() for ln in response.content[0].text.strip().split("\n")
             if ln.strip()
         ]
+
+        # Pre-warm CLAP embedder (loads model if needed, stays cached 5 min)
+        positive = [ln for ln in lines if not ln.upper().startswith("NOT:")]
+        if positive:
+            from albart.text_embedder import embed_texts
+            embed_texts(positive[:1])  # warm up with one descriptor
+
         return {"descriptors": lines, "mood": req.mood}
     except Exception as e:
         return {"error": str(e)}
@@ -295,6 +305,23 @@ def search_tracks(q: str, limit: int = 10) -> list[TrackInfo]:
     return results
 
 
+def _auto_start() -> None:
+    """Auto-start a DJ session from whatever Spotify is currently playing."""
+    global _dj, _dj_thread
+    try:
+        _dj = DJ(mode="exact", temperature=10)
+        _dj._song_k = 10
+        current = _dj._get_current_spotify_track()
+        seed = current if current and current in _dj._id_to_idx else None
+        _dj_thread = threading.Thread(
+            target=_run_dj, args=(_dj, seed), daemon=True
+        )
+        _dj_thread.start()
+        logger.info("Auto-started DJ session")
+    except Exception as e:
+        logger.warning("Auto-start failed: %s", e)
+
+
 def main():
     parser = argparse.ArgumentParser(description="ALBart DJ Server")
     parser.add_argument("--port", type=int, default=8765)
@@ -302,6 +329,7 @@ def main():
     args = parser.parse_args()
 
     logger.info("Starting ALBart DJ Server on %s:%d", args.host, args.port)
+    _auto_start()
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
 
 

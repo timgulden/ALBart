@@ -130,7 +130,7 @@ class DJ:
         self._mood_embs: np.ndarray | None = None
         self._mood_text: str | None = None
         self._mood_descriptors: list[str] = []
-        self._mood_threshold: float = 0.15
+        self._mood_threshold: float = 0.20  # cosine sim; higher = stricter
         if mood:
             self._setup_mood(mood)
 
@@ -141,10 +141,10 @@ class DJ:
         """Convert free-text mood description into CLAP embeddings for filtering.
 
         Sends the text to Claude to expand into ~20 genre descriptors,
-        then embeds each via CLAP.
+        then embeds each via CLAP text inference.
         """
         import anthropic
-        from albart.utils import DATA_DIR
+        from albart.text_embedder import embed_texts
 
         self._mood_text = mood_text
         logger.info("Processing mood: %s", mood_text)
@@ -177,43 +177,15 @@ class DJ:
         for ln in lines:
             logger.info("  %s", ln)
 
-        # Separate positive and negative descriptors
+        # Step 2: Embed descriptors directly via CLAP text inference
         positive = [ln for ln in lines if not ln.upper().startswith("NOT:")]
-        negative = [ln[4:].strip() for ln in lines if ln.upper().startswith("NOT:")]
-
-        # Step 2: Embed descriptors via CLAP
-        text_labels_path = DATA_DIR / "text_labels.npz"
-        if text_labels_path.exists():
-            # Use pre-built vocabulary if available
-            tl = np.load(str(text_labels_path), allow_pickle=True)
-            vocab_labels = list(tl["labels"])
-            vocab_embs = tl["embeddings"].astype(np.float32)
-
-            # Match each descriptor to nearest vocab entry
-            matched_embs = []
-            for desc in positive:
-                # Simple: find vocab entry that contains the most similar words
-                desc_lower = desc.lower()
-                best_idx = 0
-                best_score = -1
-                for vi, vl in enumerate(vocab_labels):
-                    # Word overlap score
-                    desc_words = set(desc_lower.split())
-                    vocab_words = set(vl.lower().split())
-                    overlap = len(desc_words & vocab_words)
-                    if overlap > best_score:
-                        best_score = overlap
-                        best_idx = vi
-                matched_embs.append(vocab_embs[best_idx])
-
-            if matched_embs:
-                self._mood_embs = np.stack(matched_embs).astype(np.float32)
-                logger.info("Mood filter active: %d positive descriptors",
-                            len(matched_embs))
-            else:
-                logger.warning("No mood descriptors matched — mood filter disabled")
+        if positive:
+            self._mood_embs = embed_texts(positive)
+            logger.info("Mood filter active: %d descriptors embedded (%d dims)",
+                        len(positive), self._mood_embs.shape[1])
         else:
-            logger.warning("No text_labels.npz found — mood filter disabled")
+            self._mood_embs = None
+            logger.warning("No positive mood descriptors — filter disabled")
 
     def _is_in_mood(self, tid: str) -> bool:
         """Check if a track is within the mood-defined region."""
@@ -387,8 +359,14 @@ class DJ:
             np.float32
         )  # re-normalize (CLAP embeddings are L2-normalized)
 
-        # Find nearest unplayed to the target point
+        # Find nearest unplayed to the target point, filtered by mood
         candidates = self._find_nearest_unplayed(target, k=NORMAL_HOP_K)
+        if self._mood_embs is not None:
+            candidates = [(t, d) for t, d in candidates if self._is_in_mood(t)]
+            if not candidates:
+                # Widen search if mood filter rejected everything
+                candidates = self._find_nearest_unplayed(target, k=NORMAL_HOP_K * 3)
+                candidates = [(t, d) for t, d in candidates if self._is_in_mood(t)]
         if not candidates:
             return self._pick_normal_hop(emb_curr)
 
