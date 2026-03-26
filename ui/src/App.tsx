@@ -179,14 +179,20 @@ function App() {
   }, [])
 
   const onSeekEnd = useCallback(async () => {
-    setSeeking(false)
+    // Set progress and poll baseline BEFORE resuming ticker
+    // so it ticks from the new position, not the old one
     setProgress(seekPos)
+    setLastPollTime(Date.now())
+    if (status) {
+      status.progress_ms = seekPos
+    }
+    setSeeking(false)
     await fetch(`${API}/seek`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ position_ms: Math.round(seekPos) }),
     })
-  }, [seekPos])
+  }, [seekPos, status])
 
   // Sync volume from active device
   useEffect(() => {
