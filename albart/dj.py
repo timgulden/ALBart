@@ -59,10 +59,13 @@ class DJ:
         hop_multiplier: float = 5.0,
         mode: str = "exact",
         udp_port: int = 57002,
+        temperature: float = 0.5,
+        mood: str | None = None,
     ) -> None:
         self.hop_interval = hop_interval_minutes * 60.0  # seconds
         self.hop_multiplier = hop_multiplier
         self._mode = mode  # "exact" or "listen"
+        self._temperature = temperature  # 0.0 = nearest only, 1.0 = wide exploration
 
         # ── Load embeddings + metadata ────────────────────────────────────
         logger.info("Loading embeddings and metadata...")
@@ -117,6 +120,107 @@ class DJ:
         self._monitored_track: str | None = None  # Spotify track ID we're watching
         self._pending_hop_type: str | None = None
         self._rng = np.random.default_rng()
+
+        # ── Mood filtering ──────────────────────────────────────────────
+        # mood_embs: (M, 512) CLAP text embeddings defining "in-bounds" space
+        # If set, candidates must have cosine sim > threshold to at least one
+        self._mood_embs: np.ndarray | None = None
+        self._mood_threshold: float = 0.15  # cosine sim threshold
+        if mood:
+            self._setup_mood(mood)
+
+        logger.info("Temperature: %.2f  (%.0f candidates per hop)",
+                    self._temperature,
+                    max(3, int(NORMAL_HOP_K * self._temperature)))
+
+    def _setup_mood(self, mood_text: str) -> None:
+        """Convert free-text mood description into CLAP embeddings for filtering.
+
+        Sends the text to Claude to expand into ~20 genre descriptors,
+        then embeds each via CLAP.
+        """
+        import anthropic
+        from albart.utils import DATA_DIR
+
+        logger.info("Processing mood: %s", mood_text)
+
+        # Step 1: Claude expands the mood into genre descriptors
+        client = anthropic.Anthropic()
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=1024,
+            messages=[{
+                "role": "user",
+                "content": (
+                    "I'm setting up a music DJ that should play tracks matching "
+                    "a specific mood. Given this description:\n\n"
+                    f'"{mood_text}"\n\n'
+                    "Generate exactly 20 short music genre/mood descriptors "
+                    "(2-5 words each) that define what kind of music should play. "
+                    "Include both positive descriptors (what TO play) and avoid "
+                    "descriptors prefixed with 'NOT:' for what to avoid.\n\n"
+                    "Return ONLY the list, one per line, no numbering."
+                ),
+            }],
+        )
+        lines = [
+            ln.strip() for ln in response.content[0].text.strip().split("\n")
+            if ln.strip()
+        ]
+        logger.info("Mood descriptors (%d):", len(lines))
+        for ln in lines:
+            logger.info("  %s", ln)
+
+        # Separate positive and negative descriptors
+        positive = [ln for ln in lines if not ln.upper().startswith("NOT:")]
+        negative = [ln[4:].strip() for ln in lines if ln.upper().startswith("NOT:")]
+
+        # Step 2: Embed descriptors via CLAP
+        text_labels_path = DATA_DIR / "text_labels.npz"
+        if text_labels_path.exists():
+            # Use pre-built vocabulary if available
+            tl = np.load(str(text_labels_path), allow_pickle=True)
+            vocab_labels = list(tl["labels"])
+            vocab_embs = tl["embeddings"].astype(np.float32)
+
+            # Match each descriptor to nearest vocab entry
+            matched_embs = []
+            for desc in positive:
+                # Simple: find vocab entry that contains the most similar words
+                desc_lower = desc.lower()
+                best_idx = 0
+                best_score = -1
+                for vi, vl in enumerate(vocab_labels):
+                    # Word overlap score
+                    desc_words = set(desc_lower.split())
+                    vocab_words = set(vl.lower().split())
+                    overlap = len(desc_words & vocab_words)
+                    if overlap > best_score:
+                        best_score = overlap
+                        best_idx = vi
+                matched_embs.append(vocab_embs[best_idx])
+
+            if matched_embs:
+                self._mood_embs = np.stack(matched_embs).astype(np.float32)
+                logger.info("Mood filter active: %d positive descriptors",
+                            len(matched_embs))
+            else:
+                logger.warning("No mood descriptors matched — mood filter disabled")
+        else:
+            logger.warning("No text_labels.npz found — mood filter disabled")
+
+    def _is_in_mood(self, tid: str) -> bool:
+        """Check if a track is within the mood-defined region."""
+        if self._mood_embs is None:
+            return True  # no filter = everything allowed
+        emb = self._get_embedding(tid)
+        if emb is None:
+            return True
+        # L2-normalize for cosine similarity
+        emb_norm = emb / (np.linalg.norm(emb) + 1e-8)
+        # Max cosine sim to any mood descriptor
+        sims = self._mood_embs @ emb_norm
+        return float(np.max(sims)) > self._mood_threshold
 
     def _start_udp_listener(self, port: int) -> None:
         """Background thread that receives embeddings from the main engine."""
@@ -205,20 +309,38 @@ class DJ:
         return artists
 
     def _pick_normal_hop(self, current_emb: np.ndarray) -> str | None:
-        """Pick from the nearest unplayed tracks (weighted by closeness).
+        """Pick from nearest unplayed tracks.
 
-        Penalizes tracks by recently-played artists (0.1× weight).
+        Temperature controls the pool size and weight sharpness.
+        Mood filter rejects tracks outside the mood region.
+        Artist penalty avoids same-artist runs.
         """
-        candidates = self._find_nearest_unplayed(current_emb, k=NORMAL_HOP_K)
+        # Temperature scales the candidate pool: 0.1 → 3 tracks, 1.0 → 20
+        k = max(3, int(NORMAL_HOP_K * self._temperature))
+        candidates = self._find_nearest_unplayed(current_emb, k=k)
         if not candidates:
             logger.warning("No unplayed tracks found nearby!")
             return None
+
+        # Mood filter: reject candidates outside the mood region
+        if self._mood_embs is not None:
+            candidates = [(t, d) for t, d in candidates if self._is_in_mood(t)]
+            if not candidates:
+                logger.warning("No in-mood tracks nearby — relaxing filter")
+                candidates = self._find_nearest_unplayed(current_emb, k=k * 3)
+                candidates = [(t, d) for t, d in candidates if self._is_in_mood(t)]
+            if not candidates:
+                return None
 
         recent_artists = self._recent_artists(3)
 
         tids = [c[0] for c in candidates]
         dists = np.array([c[1] for c in candidates])
-        weights = 1.0 / np.maximum(dists, 1e-8)
+
+        # Temperature also sharpens/softens the distance weighting
+        # Low temp → sharp (nearest dominates), high temp → flat (more random)
+        sharpness = 1.0 / max(self._temperature, 0.05)
+        weights = (1.0 / np.maximum(dists, 1e-8)) ** sharpness
 
         # Penalize same artist as recent tracks
         for i, tid in enumerate(tids):
@@ -567,6 +689,17 @@ def main() -> None:
         "--port", type=int, default=57002,
         help="UDP port to receive engine broadcasts (listen mode)",
     )
+    parser.add_argument(
+        "--temperature", type=float, default=0.5,
+        help="Exploration temperature: 0.1 = tight (nearest few), "
+             "1.0 = wide (top 20). Default: 0.5",
+    )
+    parser.add_argument(
+        "--mood", type=str, default=None,
+        help='Mood description, e.g. "chill dinner party, jazz, '
+             'downtempo electronic, no opera". Uses Claude API to expand '
+             "into genre descriptors, then CLAP to filter candidates.",
+    )
     args = parser.parse_args()
 
     dj = DJ(
@@ -574,6 +707,8 @@ def main() -> None:
         hop_multiplier=args.hop_multiplier,
         mode=args.mode,
         udp_port=args.port,
+        temperature=args.temperature,
+        mood=args.mood,
     )
 
     seed = None

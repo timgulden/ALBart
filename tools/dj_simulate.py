@@ -65,6 +65,8 @@ def main() -> None:
     dj._rng = np.random.default_rng(42)
     dj._mode = "exact"
     dj._live_emb = None
+    dj._temperature = 0.5
+    dj._mood_embs = None
 
     # Find seed
     seed_tid = None
