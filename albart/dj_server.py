@@ -63,6 +63,18 @@ class MoodThresholdUpdate(BaseModel):
     threshold: float
 
 
+class VolumeUpdate(BaseModel):
+    volume: int
+
+
+class DeviceInfo(BaseModel):
+    id: str
+    name: str
+    type: str
+    is_active: bool
+    volume: int
+
+
 class MoodUpdate(BaseModel):
     mood: str
 
@@ -340,6 +352,46 @@ def search_tracks(q: str, limit: int = 10) -> list[TrackInfo]:
             if len(results) >= limit:
                 break
     return results
+
+
+@app.get("/api/devices")
+def get_devices() -> list[DeviceInfo]:
+    if _dj is None:
+        return []
+    try:
+        devices = _dj._sp.devices()
+        return [
+            DeviceInfo(
+                id=d["id"], name=d["name"], type=d["type"],
+                is_active=d["is_active"],
+                volume=d.get("volume_percent", 0),
+            )
+            for d in devices.get("devices", [])
+        ]
+    except Exception:
+        return []
+
+
+@app.put("/api/volume")
+def set_volume(req: VolumeUpdate) -> dict:
+    if _dj is None:
+        return {"error": "No active session"}
+    try:
+        _dj._sp.volume(max(0, min(100, req.volume)))
+        return {"volume": req.volume}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/api/device/{device_id}")
+def set_device(device_id: str) -> dict:
+    if _dj is None:
+        return {"error": "No active session"}
+    try:
+        _dj._sp.transfer_playback(device_id, force_play=True)
+        return {"status": "transferred", "device": device_id}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 def _auto_start() -> None:
