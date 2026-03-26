@@ -421,7 +421,7 @@ class DJ:
 
         try:
             while True:
-                time.sleep(3)  # poll every 3 seconds
+                time.sleep(5)  # poll Spotify API every 5 seconds
 
                 # Keep the map display updated with current track's embedding
                 # (works as standalone visualization when no engine is running)

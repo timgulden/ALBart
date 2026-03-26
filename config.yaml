@@ -53,7 +53,7 @@ runtime:
 
 neighborhood:
   k: 100                       # nearest neighbors used for PCA basis
-  base_thumb_px: 250           # thumbnail size at foreground (z=0)
+  base_thumb_px: 375           # thumbnail size at z=0 (was 250 + 50% for removed proximity boost)
   focal_length: 0.55           # perspective focal; smaller = faster size falloff with depth
   z_near: 1.5                  # camera-to-sphere distance; larger = more foreground depth
   zoom: 5.0                    # zoom level; higher = fewer tracks visible (tune to taste)

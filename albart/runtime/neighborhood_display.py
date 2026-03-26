@@ -195,10 +195,10 @@ class NeighborhoodDisplay:
         self._all_proj:        Optional[np.ndarray] = None
         self._all_proj_smooth: Optional[np.ndarray] = None
 
-        # Camera orbit (time-based, not frame-based)
-        self._cam_angle: float = 0.0
-        self._cam_rate:  float = 0.012          # radians per second (~0.7°/s)
-        self._cam_tilt:  float = 0.12
+        # Camera orbit (constant speed, constant direction)
+        self._cam_angle: float = 0.0            # azimuth
+        self._cam_tilt:  float = 0.12           # fixed elevation
+        self._cam_rate:  float = 0.012          # rad/s (~0.7°/s)
 
         # ── Hover / tooltip state ────────────────────────────────────────
         self._hover_track_id:  Optional[str] = None
@@ -472,7 +472,7 @@ class NeighborhoodDisplay:
                 self._all_proj - self._all_proj_smooth
             )
 
-        # Camera orbit (dt-scaled for frame-rate independence)
+        # Camera orbit: constant speed, fixed direction
         self._cam_angle += self._cam_rate * dt
 
         # Hover detection
@@ -541,18 +541,20 @@ class NeighborhoodDisplay:
         max_z = (self._canvas_h / 2.0) / (scale_at_z0 * self._ppu)
         z_ok = z <= max_z
 
-        # Size with depth fade + proximity boost
+        # Size: perspective scale for foreground, depth fade for background
+        persp_size = self._base_thumb_px * scale  # raw perspective size
+
+        # Background depth fade (z > 0): shrinks to 10px at max_z
         z_frac = np.clip(z / max(max_z, 1e-8), 0.0, 1.0)
         min_thumb = 10.0
         max_thumb = float(self._base_thumb_px) * scale_at_z0
-        z_thumb = max_thumb * (1.0 - z_frac) + min_thumb * z_frac
+        bg_size = max_thumb * (1.0 - z_frac) + min_thumb * z_frac
 
-        r_3d = np.sqrt(rel[:, 0] ** 2 + rel[:, 1] ** 2 + rel[:, 2] ** 2)
-        proximity_boost = 1.0 + 0.5 * np.exp(-r_3d * 8.0)
+        # Foreground (z < 0): use full perspective size (grows as tracks approach)
+        # Background (z > 0): use the smaller of perspective and depth fade
+        tpx_base = np.where(z < 0, persp_size, np.minimum(persp_size, bg_size))
 
-        tpx = np.maximum(1.0, np.minimum(
-            self._base_thumb_px * scale, z_thumb
-        ) * proximity_boost)
+        tpx = np.maximum(1.0, tpx_base)
 
         # Alpha fade near depth boundaries (prevents pop-in/pop-out)
         # Fade out near max_z (back edge)
@@ -560,9 +562,21 @@ class NeighborhoodDisplay:
         back_alpha = np.clip((max_z - z) / max(fade_zone, 1e-8), 0.0, 1.0)
         # Foreground fade: tracks between camera and sphere (z<0) become
         # transparent.  Fully opaque at z=0, fully transparent at z = -fade_front.
-        fade_front = self._z_near * 1.5  # fade over 1.5× the camera distance
+        fade_front = self._z_near * 0.8  # fade quickly — foreground covers are large
         front_alpha = np.clip(z / fade_front + 1.0, 0.0, 1.0)
-        track_alpha = back_alpha * front_alpha
+        # Axis-proximity fade: foreground tracks near the z-axis (camera-to-cover
+        # line) become transparent so the central cover always shows through.
+        # Tracks further from the axis stay opaque.
+        r_xy = np.sqrt(rel[:, 0] ** 2 + rel[:, 1] ** 2)
+        cover_half_3d = float(self._base_thumb_px) * scale_at_z0 / (2.0 * self._ppu)
+        cyl_radius_3d = cover_half_3d * 3.0  # fade zone = 3× cover radius
+        axis_alpha = np.where(
+            z < 0,  # only apply to foreground
+            np.clip(r_xy / max(cyl_radius_3d, 1e-8), 0.0, 1.0),
+            1.0,
+        )
+
+        track_alpha = back_alpha * front_alpha * axis_alpha
 
         # On-screen mask: must be in front AND visible
         half = tpx / 2.0
@@ -581,21 +595,23 @@ class NeighborhoodDisplay:
         self._frame_sy     = sy[vis].astype(np.float32)
         self._frame_halfpx = half[vis].astype(np.float32)
 
-        # Auto-zoom: proportional response — speed scales with error.
-        # Naturally accelerates when far from target, decelerates near it.
+        # Auto-zoom
         n_vis = max(len(vis), 1)
         error = (n_vis - self._target_on_screen) / self._target_on_screen
-        zoom_rate = 0.06  # max ~6% per second at full error
+        zoom_rate = 0.06
         self._ppu *= (1.0 + error * zoom_rate * dt)
         self._ppu = max(200.0, min(5000.0, self._ppu))
 
-        # ── Draw tracks + glow frame layered at Z=0 ─────────────────────
-        # Background tracks (z > 0) first, then glow frame, then foreground
+
+        # ── Draw tracks + glow frame + label layered at Z=0 ──────────────
+        # Background tracks (z > 0) first, then glow/label, then foreground
+        self._update_label_texture()
         glow_drawn = False
         for i in order:
-            # Insert glow frame at the Z=0 boundary
+            # Insert glow frame + label at the Z=0 boundary
             if not glow_drawn and z[i] <= 0:
-                self._draw_sphere()
+                self._draw_label()   # text behind glow frame
+                self._draw_sphere()  # glow on top of text background
                 glow_drawn = True
             tid = self._id_list[i]
             tex = self._get_track_texture(tid)
@@ -605,11 +621,8 @@ class NeighborhoodDisplay:
             self._draw_quad(tex, float(sx[i]), float(sy[i]), h, h,
                             float(track_alpha[i]), border=True)
         if not glow_drawn:
+            self._draw_label()
             self._draw_sphere()
-
-        # ── Label ─────────────────────────────────────────────────────────
-        self._update_label_texture()
-        self._draw_label()
 
         # ── Tooltip ───────────────────────────────────────────────────────
         self._draw_tooltip()
@@ -619,7 +632,7 @@ class NeighborhoodDisplay:
     def _draw_sphere(self) -> None:
         """Draw a glowing hollow square frame around the central cover."""
         scale_at_z0 = self._focal_length / (self._z_near + self._focal_length)
-        frame_half = float(self._base_thumb_px) * scale_at_z0 * 1.5 / 2.0 + 4.0
+        frame_half = float(self._base_thumb_px) * scale_at_z0 / 2.0 + 4.0
         a = 0.35 + 0.25 * self._confidence
         glow = 25.0  # glow spread in pixels
         r, g, b = 0.45, 0.5, 1.0  # blue-white glow color
