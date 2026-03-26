@@ -204,7 +204,7 @@ def set_song_k(req: SongKUpdate) -> dict:
 def set_mood_threshold(req: MoodThresholdUpdate) -> dict:
     if _dj is None:
         return {"error": "No active session"}
-    _dj._mood_threshold = max(0.1, min(0.6, req.threshold))
+    _dj._mood_threshold = max(0.0, min(0.6, req.threshold))
     _dj._recompute_mood_mask()
     logger.info("Mood threshold set to %.2f", _dj._mood_threshold)
     return {"threshold": _dj._mood_threshold}

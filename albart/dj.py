@@ -222,9 +222,10 @@ class DJ:
             mask &= pos_sims.max(axis=1) > self._mood_threshold
 
         if self._mood_embs_neg is not None:
-            # Fixed threshold for negatives: tracks strongly matching a
-            # NOT descriptor are excluded regardless of the strictness slider.
-            neg_threshold = 0.45
+            # Negative threshold = 1 - positive threshold.
+            # At strictness 0: neg=1.0 (nothing excluded, no filtering)
+            # At strictness 0.6: neg=0.4 (strict negative exclusion)
+            neg_threshold = 1.0 - self._mood_threshold
             neg_sims = emb_normed @ self._mood_embs_neg.T
             mask &= neg_sims.max(axis=1) <= neg_threshold
 
