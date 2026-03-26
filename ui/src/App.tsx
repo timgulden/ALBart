@@ -38,6 +38,8 @@ function App() {
   const [progress, setProgress] = useState(0)   // ms, ticks locally
   const [duration, setDuration] = useState(0)    // ms, from status poll
   const [lastPollTime, setLastPollTime] = useState(0)
+  const [seeking, setSeeking] = useState(false)  // true while user drags
+  const [seekPos, setSeekPos] = useState(0)      // position while dragging
   const [error, setError] = useState('')
 
   // Poll status
@@ -157,27 +159,34 @@ function App() {
     })
   }, [])
 
-  // Local progress ticker (advances between polls)
+  // Local progress ticker (pauses while user is dragging)
   useEffect(() => {
-    if (!status?.playing || duration <= 0) return
+    if (!status?.playing || duration <= 0 || seeking) return
     const tick = setInterval(() => {
-      setProgress(prev => {
-        const elapsed = Date.now() - lastPollTime
-        const estimated = (status?.progress_ms ?? 0) + elapsed
-        return Math.min(estimated, duration)
-      })
+      const elapsed = Date.now() - lastPollTime
+      const estimated = (status?.progress_ms ?? 0) + elapsed
+      setProgress(Math.min(estimated, duration))
     }, 250)
     return () => clearInterval(tick)
-  }, [status?.playing, status?.progress_ms, duration, lastPollTime])
+  }, [status?.playing, status?.progress_ms, duration, lastPollTime, seeking])
 
-  const seekTo = useCallback(async (ms: number) => {
-    setProgress(ms)
+  const onSeekStart = useCallback(() => {
+    setSeeking(true)
+  }, [])
+
+  const onSeekMove = useCallback((ms: number) => {
+    setSeekPos(ms)
+  }, [])
+
+  const onSeekEnd = useCallback(async () => {
+    setSeeking(false)
+    setProgress(seekPos)
     await fetch(`${API}/seek`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ position_ms: Math.round(ms) }),
+      body: JSON.stringify({ position_ms: Math.round(seekPos) }),
     })
-  }, [])
+  }, [seekPos])
 
   // Sync volume from active device
   useEffect(() => {
@@ -269,8 +278,12 @@ function App() {
                     <div style={{ position: 'relative', height: 20 }}>
                       <input
                         type="range" min={0} max={duration} step={1000}
-                        value={progress}
-                        onChange={e => seekTo(parseFloat(e.target.value))}
+                        value={seeking ? seekPos : progress}
+                        onMouseDown={onSeekStart}
+                        onTouchStart={onSeekStart}
+                        onChange={e => onSeekMove(parseFloat(e.target.value))}
+                        onMouseUp={onSeekEnd}
+                        onTouchEnd={onSeekEnd}
                         style={{
                           position: 'absolute', top: 0, left: 0,
                           width: '100%', height: '100%',
@@ -283,8 +296,8 @@ function App() {
                       }}>
                         <div style={{
                           height: '100%', borderRadius: 3, background: '#4a6cf7',
-                          width: `${(progress / duration) * 100}%`,
-                          transition: 'width 0.25s linear',
+                          width: `${((seeking ? seekPos : progress) / duration) * 100}%`,
+                          transition: seeking ? 'none' : 'width 0.25s linear',
                         }} />
                       </div>
                     </div>
@@ -292,7 +305,7 @@ function App() {
                       display: 'flex', justifyContent: 'space-between',
                       fontSize: 12, color: '#555', marginTop: 2,
                     }}>
-                      <span>{formatTime(progress)}</span>
+                      <span>{formatTime(seeking ? seekPos : progress)}</span>
                       <span>{formatTime(duration)}</span>
                     </div>
                   </div>
