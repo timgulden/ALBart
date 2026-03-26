@@ -1,0 +1,198 @@
+# ALBart
+
+**Ambient audio visualization and DJ system.** ALBart listens to music, identifies tracks from your Spotify library using CLAP audio embeddings, and displays album art on a 32×32 LED matrix. A companion 3D visualization shows the musical neighborhood around whatever is playing, and an automated DJ navigates through your library by embedding similarity.
+
+## Three Programs
+
+### ALBart Listener
+Captures live audio, computes CLAP embeddings, identifies the closest track in your library, and drives a 32×32 LED display (simulated on macOS, HUB75 panel on Raspberry Pi).
+
+```bash
+python -m albart.listener
+python -m albart.listener --device "BlackHole"
+```
+
+### ALBart MapView
+A GPU-accelerated 3D visualization of your music library. The currently playing track appears at center, surrounded by a cloud of album covers arranged by musical similarity. The cloud slowly rotates, with foreground tracks fading to keep the central cover visible.
+
+```bash
+python -m albart.mapview --mode half --view neighborhood
+python -m albart.mapview --mode half --view umap
+```
+
+**Views:**
+- `neighborhood` — 3D perspective cloud centered on the current track (default)
+- `umap` — 2D global map with heatmap trail and Voronoi labels
+
+**Mouse:** hover for track info tooltip, click to send track to the DJ.
+
+### ALBart DJ
+Automated music exploration through embedding space. Plays tracks from your Spotify library, hopping to nearby tracks with occasional longer jumps to fresh territory.
+
+```bash
+python -m albart.dj                           # exact mode (default)
+python -m albart.dj --mode listen             # use live audio embedding
+python -m albart.dj --seed "paint it black"   # start from a specific track
+python -m albart.dj --hop-interval 20         # long hop every 20 min
+```
+
+**Modes:**
+- `exact` — hops based on the stored preview embedding of each track. Controlled, repeatable.
+- `listen` — hops based on the Listener's live audio embedding. Reflects what the song actually sounds like but may drift at song boundaries.
+
+**Overrides:**
+- Change the track in Spotify → DJ detects it and continues from there
+- Click a track in the MapView → DJ plays it and continues from there
+
+## How They Work Together
+
+**With BlackHole (live audio capture):**
+```
+Spotify → BlackHole → Listener → embeddings → MapView
+                                            → LED display
+```
+The Listener captures system audio via BlackHole, identifies tracks, drives the LED, and sends embeddings to the MapView via UDP. The MapView shows a shifting 3D cloud that evolves as the audio changes (~every 10 seconds).
+
+**With AirPlay speakers (no BlackHole):**
+```
+Spotify → AirPlay → speakers
+   DJ → stored embeddings → MapView
+```
+The DJ controls Spotify and sends stored embeddings directly to the MapView. The visualization updates on each track change. No Listener needed.
+
+**All three together:**
+```
+Spotify → BlackHole → Listener → live embeddings → MapView
+   DJ → playback control                        → LED display
+        ↳ stored embeddings → MapView (backup)
+```
+The Listener provides rich live embeddings (shifting within a song). The DJ controls what plays. Both feed the MapView — the Listener's updates dominate when running.
+
+## Setup
+
+### Prerequisites
+- Python 3.9+
+- Spotify Developer credentials ([dashboard](https://developer.spotify.com/dashboard))
+- macOS with BlackHole for live audio capture (optional — DJ mode works without it)
+
+### Install
+```bash
+pip install -r requirements.txt
+```
+
+### Build the Database
+```bash
+export SPOTIPY_CLIENT_ID="your_client_id"
+export SPOTIPY_CLIENT_SECRET="your_client_secret"
+
+python setup_database.py
+```
+
+This runs the full pipeline:
+1. Pulls your top tracks from Spotify
+2. Downloads 30-second preview clips and album art
+3. Computes CLAP audio embeddings (512-dimensional)
+4. Builds FAISS nearest-neighbor indices
+5. Computes 2D and 5D UMAP projections for visualization
+6. Optionally builds Voronoi cluster labels (requires `ANTHROPIC_API_KEY`)
+
+The database lives in `data/` (~500MB for ~5000 tracks). Run `setup_database.py --force` to rebuild everything.
+
+### Configure
+Edit `config.yaml` for runtime tuning:
+
+```yaml
+runtime:
+  embedding_interval_seconds: 10    # how often to re-embed live audio
+  embedding_alpha: 1.0             # EMA smoothing (1.0 = no smoothing)
+  norm_target_raw: 0.12            # RMS normalization before CLAP
+  display_mode: sim                # sim (macOS) or hub75 (Raspberry Pi)
+
+neighborhood:
+  k: 100                          # neighbors for PCA basis
+  base_thumb_px: 375              # album cover size at z=0
+  focal_length: 0.55              # perspective depth effect
+  lerp_speed: 0.3                 # position transition speed
+  recompute_threshold: 0.50       # how far embedding must move to recompute PCA
+```
+
+## Architecture
+
+### Embedding Pipeline
+Audio → 3×10s chunks → CLAP (`laion/clap-htsat-unfused`) → 512-dim embeddings → L2-normalized → FAISS index.
+
+Both raw (no normalization) and norm (RMS-normalized to 0.12) embeddings are computed. The runtime uses the norm path for better volume-independent recognition.
+
+### Neighborhood Visualization
+The 3D cloud uses a hybrid projection:
+- **5D UMAP** captures global genre structure (pre-computed, stable)
+- **Local PCA** (5D→3D) adapts the view to the current neighborhood
+- **Actual L2 distances** (shifted so nearest = center) determine radial position
+- **OpenGL** renders textured quads at float positions with mipmapping and MSAA
+
+### DJ Navigation
+- **Normal hops**: picks from the 20 nearest unplayed tracks, weighted by closeness, with artist penalty to avoid same-artist runs
+- **Long hops** (every ~30 min): extrapolates the trajectory of the last two tracks, landing 5× further along in embedding space
+- **Near-duplicate filter**: skips tracks within L2 < 0.01 of recently played (catches remasters)
+
+## Project Structure
+
+```
+ALBart/
+  albart/
+    listener.py              # Entry: python -m albart.listener
+    mapview.py               # Entry: python -m albart.mapview
+    dj.py                    # Entry: python -m albart.dj
+    utils.py                 # Shared: device selection, config loading
+    pipeline/
+      run_pipeline.py        # Master pipeline: pull → download → embed → index
+      spotify.py             # Spotify API client
+      downloader.py          # Preview + art download
+      embedder.py            # CLAP inference + FAISS index build
+      database.py            # SQLite schema
+      preprocess.py          # Image downsampling
+      deezer.py              # Deezer preview fallback
+      itunes.py              # iTunes preview fallback
+    runtime/
+      run.py                 # Listener implementation
+      run_map.py             # MapView implementation
+      neighborhood_display.py # 3D OpenGL neighborhood view
+      map_display.py         # 2D UMAP map view
+      audio.py               # Mic capture + circular buffer
+      embedder.py            # Runtime CLAP inference
+      lookup.py              # FAISS query + alias sampling
+      loop.py                # LED display loop
+      display.py             # Display backend interface
+      display_sim.py         # pygame simulated display
+      display_hub75.py       # HUB75 LED panel display
+      agc.py                 # Automatic gain control
+      startup.py             # Startup animation
+  tools/
+    build_umap.py            # 2D UMAP projection
+    build_umap_5d.py         # 5D UMAP projection
+    build_voronoi.py         # Voronoi cluster labels (uses Claude API)
+    build_text_labels.py     # CLAP text embeddings
+    dj_simulate.py           # Offline DJ trajectory simulation
+    review_art.py            # 32×32 art inspection
+    reembed_existing.py      # Re-embed tracks (schema migration)
+    archive/                 # Diagnostic scripts from development
+  setup_database.py          # One-command database build
+  config.yaml                # All tunable parameters
+  data/                      # Generated data (gitignored)
+```
+
+## Key Dependencies
+
+| Package | Purpose |
+|---|---|
+| `spotipy` | Spotify API |
+| `torch` + `transformers` | CLAP model inference |
+| `faiss-cpu` | Nearest-neighbor search |
+| `umap-learn` | Dimensionality reduction |
+| `pygame` + `PyOpenGL` | Display + GPU rendering |
+| `sounddevice` | Audio capture |
+| `numpy` | Everything numerical |
+
+## License
+
+Personal project. Not licensed for redistribution.
