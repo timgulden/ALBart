@@ -11,6 +11,8 @@ interface TrackInfo {
 interface Status {
   playing: boolean
   current_track: TrackInfo | null
+  progress_ms: number
+  duration_ms: number
   song_k: number
   set_distance: number
   mood_text: string | null
@@ -33,6 +35,9 @@ function App() {
   const [moodApplied, setMoodApplied] = useState(false)
   const [moodThreshold, setMoodThreshold] = useState(0.35)
   const [volume, setVolume] = useState(50)
+  const [progress, setProgress] = useState(0)   // ms, ticks locally
+  const [duration, setDuration] = useState(0)    // ms, from status poll
+  const [lastPollTime, setLastPollTime] = useState(0)
   const [error, setError] = useState('')
 
   // Poll status
@@ -45,6 +50,9 @@ function App() {
           if (active && res.ok) {
             const data: Status = await res.json()
             setStatus(data)
+            setProgress(data.progress_ms)
+            setDuration(data.duration_ms)
+            setLastPollTime(Date.now())
           }
         } catch { /* server not running */ }
         await new Promise(r => setTimeout(r, 2000))
@@ -149,6 +157,28 @@ function App() {
     })
   }, [])
 
+  // Local progress ticker (advances between polls)
+  useEffect(() => {
+    if (!status?.playing || duration <= 0) return
+    const tick = setInterval(() => {
+      setProgress(prev => {
+        const elapsed = Date.now() - lastPollTime
+        const estimated = (status?.progress_ms ?? 0) + elapsed
+        return Math.min(estimated, duration)
+      })
+    }, 250)
+    return () => clearInterval(tick)
+  }, [status?.playing, status?.progress_ms, duration, lastPollTime])
+
+  const seekTo = useCallback(async (ms: number) => {
+    setProgress(ms)
+    await fetch(`${API}/seek`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ position_ms: Math.round(ms) }),
+    })
+  }, [])
+
   // Sync volume from active device
   useEffect(() => {
     const poll = setInterval(async () => {
@@ -233,6 +263,40 @@ function App() {
                     </>
                   )}
                 </div>
+                {/* Progress bar */}
+                {duration > 0 && (
+                  <div style={{ marginTop: 12 }}>
+                    <div style={{ position: 'relative', height: 20 }}>
+                      <input
+                        type="range" min={0} max={duration} step={1000}
+                        value={progress}
+                        onChange={e => seekTo(parseFloat(e.target.value))}
+                        style={{
+                          position: 'absolute', top: 0, left: 0,
+                          width: '100%', height: '100%',
+                          opacity: 0, cursor: 'pointer', zIndex: 2,
+                        }}
+                      />
+                      <div style={{
+                        position: 'absolute', top: 6, left: 0, right: 0, height: 6,
+                        background: '#0f1729', borderRadius: 3,
+                      }}>
+                        <div style={{
+                          height: '100%', borderRadius: 3, background: '#4a6cf7',
+                          width: `${(progress / duration) * 100}%`,
+                          transition: 'width 0.25s linear',
+                        }} />
+                      </div>
+                    </div>
+                    <div style={{
+                      display: 'flex', justifyContent: 'space-between',
+                      fontSize: 12, color: '#555', marginTop: 2,
+                    }}>
+                      <span>{formatTime(progress)}</span>
+                      <span>{formatTime(duration)}</span>
+                    </div>
+                  </div>
+                )}
               </>
             ) : (
               <div style={{ display: 'flex', gap: 8 }}>
@@ -490,6 +554,13 @@ function Slider({ label, value, min, max, step, leftLabel, rightLabel, onChange 
       </div>
     </div>
   )
+}
+
+function formatTime(ms: number): string {
+  const s = Math.floor(ms / 1000)
+  const m = Math.floor(s / 60)
+  const sec = s % 60
+  return `${m}:${sec.toString().padStart(2, '0')}`
 }
 
 // ── Styles ───────────────────────────────────────────────────────────────

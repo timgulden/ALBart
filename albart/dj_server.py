@@ -88,6 +88,8 @@ class TrackInfo(BaseModel):
 class StatusResponse(BaseModel):
     playing: bool
     current_track: Optional[TrackInfo] = None
+    progress_ms: int = 0
+    duration_ms: int = 0
     song_k: int
     set_distance: float
     mood_text: Optional[str] = None
@@ -97,6 +99,10 @@ class StatusResponse(BaseModel):
     played_count: int
     total_tracks: int
     history: list[TrackInfo]
+
+
+class SeekRequest(BaseModel):
+    position_ms: int
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -134,9 +140,22 @@ def get_status() -> StatusResponse:
 
     history = [_track_info(_dj, tid) for tid in reversed(_dj._history[-20:])]
 
+    # Grab playback progress
+    progress_ms = 0
+    duration_ms = 0
+    try:
+        pb = _dj._sp.current_playback()
+        if pb and pb.get("item"):
+            progress_ms = pb.get("progress_ms", 0)
+            duration_ms = pb["item"].get("duration_ms", 0)
+    except Exception:
+        pass
+
     return StatusResponse(
         playing=_dj_thread is not None and _dj_thread.is_alive(),
         current_track=current,
+        progress_ms=progress_ms,
+        duration_ms=duration_ms,
         song_k=_dj._song_k,
         set_distance=_dj.hop_multiplier,
         mood_text=_dj._mood_text,
@@ -288,6 +307,17 @@ def apply_mood(req: DescriptorsUpdate) -> dict:
         logger.info("Mood applied: %d positive, %d negative descriptors",
                     len(positive), len(negative))
         return {"status": "mood applied", "descriptors": lines}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.put("/api/seek")
+def seek_track(req: SeekRequest) -> dict:
+    if _dj is None:
+        return {"error": "No active session"}
+    try:
+        _dj._sp.seek_track(max(0, req.position_ms))
+        return {"position_ms": req.position_ms}
     except Exception as e:
         return {"error": str(e)}
 
