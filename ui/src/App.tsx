@@ -31,6 +31,7 @@ function App() {
   const [moodPending, setMoodPending] = useState(false)
   const [moodDescriptors, setMoodDescriptors] = useState<string[]>([])
   const [moodApplied, setMoodApplied] = useState(false)
+  const [moodThreshold, setMoodThreshold] = useState(0.35)
   const [error, setError] = useState('')
 
   // Poll status
@@ -137,6 +138,15 @@ function App() {
       setError('Apply mood failed — is the DJ running?')
     }
   }, [mood])
+
+  const updateMoodThreshold = useCallback(async (t: number) => {
+    setMoodThreshold(t)
+    await fetch(`${API}/mood_threshold`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ threshold: t }),
+    })
+  }, [])
 
   const playNow = useCallback(async (trackId: string) => {
     await fetch(`${API}/play/${trackId}`, { method: 'POST' })
@@ -281,7 +291,7 @@ function App() {
             <textarea
               rows={3}
               placeholder="chill dinner party, jazz, downtempo, no opera..."
-              value={mood} onChange={e => setMood(e.target.value)}
+              value={mood} onChange={e => { setMood(e.target.value); setMoodApplied(false) }}
               style={{ ...inputStyle, width: '100%', resize: 'vertical' }}
             />
             <button
@@ -295,45 +305,67 @@ function App() {
             </button>
 
             {/* Claude's interpretation */}
-            {moodDescriptors.length > 0 && (
-              <div style={{
-                marginTop: 14, padding: 14,
-                background: '#0f1729', borderRadius: 8,
-                border: '1px solid #2a2f45',
-              }}>
-                <div style={{ fontSize: 13, color: '#667', marginBottom: 8 }}>
-                  Claude's interpretation:
+            <div style={{
+              marginTop: 14, padding: 14,
+              background: '#0f1729', borderRadius: 8,
+              border: '1px solid #2a2f45',
+              minHeight: 60,
+            }}>
+              {moodDescriptors.length > 0 ? (
+                <>
+                  <div style={{ fontSize: 13, color: '#667', marginBottom: 8 }}>
+                    Claude's interpretation:
+                  </div>
+                  <div style={{ lineHeight: 2.0 }}>
+                    {moodDescriptors.map((d, i) => {
+                      const isNot = d.toUpperCase().startsWith('NOT:')
+                      return (
+                        <span key={i} style={{
+                          display: 'inline-block',
+                          background: isNot ? '#3d1f1f' : '#1f2d3d',
+                          borderRadius: 5,
+                          padding: '3px 10px',
+                          margin: '2px 4px 2px 0',
+                          color: isNot ? '#e88' : '#8ab4f8',
+                          fontSize: 13,
+                        }}>
+                          {d}
+                        </span>
+                      )
+                    })}
+                  </div>
+                </>
+              ) : (
+                <div style={{ fontSize: 14, color: '#444', fontStyle: 'italic' }}>
+                  Click Interpret to see how Claude breaks down your mood description
                 </div>
-                <div style={{ lineHeight: 2.0 }}>
-                  {moodDescriptors.map((d, i) => {
-                    const isNot = d.toUpperCase().startsWith('NOT:')
-                    return (
-                      <span key={i} style={{
-                        display: 'inline-block',
-                        background: isNot ? '#3d1f1f' : '#1f2d3d',
-                        borderRadius: 5,
-                        padding: '3px 10px',
-                        margin: '2px 4px 2px 0',
-                        color: isNot ? '#e88' : '#8ab4f8',
-                        fontSize: 13,
-                      }}>
-                        {d}
-                      </span>
-                    )
-                  })}
-                </div>
-                <button
-                  onClick={applyMood}
-                  disabled={moodApplied}
-                  style={{
-                    ...btnStyle(moodApplied ? '#555' : '#2ecc71'),
-                    marginTop: 12, width: '100%',
-                  }}
-                >
-                  {moodApplied ? 'Applied ✓' : 'Apply Mood'}
-                </button>
-              </div>
-            )}
+              )}
+            </div>
+
+            <button
+              onClick={applyMood}
+              disabled={moodDescriptors.length === 0 || moodApplied}
+              style={{
+                ...btnStyle(
+                  moodDescriptors.length === 0 ? '#333'
+                    : moodApplied ? '#555'
+                    : '#2ecc71'
+                ),
+                marginTop: 10, width: '100%',
+              }}
+            >
+              {moodApplied ? 'Applied ✓' : 'Apply Mood'}
+            </button>
+
+            <div style={{ marginTop: 16 }}>
+              <Slider
+                label="Mood Strictness"
+                value={moodThreshold} min={0.15} max={0.55} step={0.05}
+                leftLabel="loose (most tracks)"
+                rightLabel="strict (few tracks)"
+                onChange={updateMoodThreshold}
+              />
+            </div>
           </Card>
         </div>
       </div>

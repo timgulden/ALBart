@@ -59,6 +59,10 @@ class SetDistanceUpdate(BaseModel):
     set_distance: float
 
 
+class MoodThresholdUpdate(BaseModel):
+    threshold: float
+
+
 class MoodUpdate(BaseModel):
     mood: str
 
@@ -76,6 +80,7 @@ class StatusResponse(BaseModel):
     set_distance: float
     mood_text: Optional[str] = None
     mood_descriptors: list[str]
+    mood_threshold: float
     played_count: int
     total_tracks: int
     history: list[TrackInfo]
@@ -106,7 +111,8 @@ def get_status() -> StatusResponse:
     if _dj is None:
         return StatusResponse(
             playing=False, song_k=10, set_distance=5.0,
-            mood_descriptors=[], played_count=0, total_tracks=0, history=[],
+            mood_descriptors=[], mood_threshold=0.35,
+            played_count=0, total_tracks=0, history=[],
         )
 
     current = None
@@ -122,6 +128,7 @@ def get_status() -> StatusResponse:
         set_distance=_dj.hop_multiplier,
         mood_text=_dj._mood_text,
         mood_descriptors=_dj._mood_descriptors,
+        mood_threshold=_dj._mood_threshold,
         played_count=len(_dj._played),
         total_tracks=_dj._N,
         history=history,
@@ -172,6 +179,15 @@ def set_song_k(req: SongKUpdate) -> dict:
     _dj._song_k = max(1, min(50, req.song_k))
     logger.info("Song K set to %d", _dj._song_k)
     return {"song_k": _dj._song_k}
+
+
+@app.put("/api/mood_threshold")
+def set_mood_threshold(req: MoodThresholdUpdate) -> dict:
+    if _dj is None:
+        return {"error": "No active session"}
+    _dj._mood_threshold = max(0.1, min(0.6, req.threshold))
+    logger.info("Mood threshold set to %.2f", _dj._mood_threshold)
+    return {"threshold": _dj._mood_threshold}
 
 
 @app.put("/api/set_distance")

@@ -130,7 +130,7 @@ class DJ:
         self._mood_embs: np.ndarray | None = None
         self._mood_text: str | None = None
         self._mood_descriptors: list[str] = []
-        self._mood_threshold: float = 0.20  # cosine sim; higher = stricter
+        self._mood_threshold: float = 0.35  # cosine sim; higher = stricter
         if mood:
             self._setup_mood(mood)
 
