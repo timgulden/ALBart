@@ -435,37 +435,50 @@ function Slider({ label, value, min, max, step, leftLabel, rightLabel, onChange 
   label: string; value: number; min: number; max: number; step: number
   leftLabel: string; rightLabel: string; onChange: (v: number) => void
 }) {
-  // Position the value indicator over the slider thumb
-  const pct = ((value - min) / (max - min)) * 100
   const displayVal = Number.isInteger(step) ? String(value) : value.toFixed(1)
 
   return (
     <div style={{ marginBottom: 18 }}>
-      <Label>{label}</Label>
-      <div style={{ position: 'relative', marginBottom: 4 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 2 }}>
+        <Label>{label}</Label>
+      </div>
+      <div style={{ position: 'relative', height: 32 }}>
+        {/* Invisible range input covers the full area for dragging */}
         <input
           type="range" min={min} max={max} step={step}
           value={value}
           onChange={e => onChange(parseFloat(e.target.value))}
-          style={{ width: '100%', accentColor: '#4a6cf7' }}
+          style={{
+            position: 'absolute', top: 0, left: 0,
+            width: '100%', height: '100%',
+            opacity: 0, cursor: 'grab', zIndex: 2,
+          }}
         />
-        {/* Value bubble centered over the thumb */}
+        {/* Visual track bar */}
+        <div style={{
+          position: 'absolute', top: 12, left: 0, right: 0, height: 8,
+          background: '#0f1729', borderRadius: 4,
+        }}>
+          <div style={{
+            height: '100%', borderRadius: 4, background: '#4a6cf7',
+            width: `${((value - min) / (max - min)) * 100}%`,
+          }} />
+        </div>
+        {/* Value label as the draggable thumb */}
         <div style={{
           position: 'absolute',
-          top: -22,
-          left: `calc(${pct}% - 16px)`,
-          fontSize: 14,
-          fontWeight: 700,
-          color: '#fff',
-          background: '#4a6cf7',
-          borderRadius: 4,
-          padding: '1px 8px',
-          pointerEvents: 'none',
+          top: 0,
+          left: `calc(${((value - min) / (max - min)) * 100}% - 20px)`,
+          fontSize: 14, fontWeight: 700,
+          color: '#fff', background: '#4a6cf7',
+          borderRadius: 6, padding: '2px 10px',
+          pointerEvents: 'none', zIndex: 1,
+          minWidth: 24, textAlign: 'center',
         }}>
           {displayVal}
         </div>
       </div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: '#555' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: '#555', marginTop: 2 }}>
         <span>{leftLabel}</span>
         <span>{rightLabel}</span>
       </div>
