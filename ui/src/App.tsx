@@ -208,70 +208,44 @@ function App() {
       <div style={{ display: 'flex', gap: 24 }}>
         {/* ── Left column: Controls + Status ── */}
         <div style={{ flex: 1 }}>
-          {/* Now Playing */}
-          {status?.current_track && (
-            <Card accent>
-              <div style={{ fontSize: 13, color: '#888', marginBottom: 4 }}>Now Playing</div>
-              <div style={{ fontSize: 24, fontWeight: 600, color: '#fff' }}>
-                {status.current_track.title}
+          {/* Now Playing + controls */}
+          <Card accent>
+            {status?.current_track ? (
+              <>
+                <div style={{ fontSize: 13, color: '#888', marginBottom: 4 }}>Now Playing</div>
+                <div style={{ fontSize: 24, fontWeight: 600, color: '#fff' }}>
+                  {status.current_track.title}
+                </div>
+                <div style={{ fontSize: 17, color: '#aaa', marginTop: 4 }}>
+                  {status.current_track.artist}
+                </div>
+                <div style={{
+                  display: 'flex', alignItems: 'center', gap: 8, marginTop: 12,
+                }}>
+                  <span style={{ fontSize: 14, color: '#666' }}>
+                    {status.played_count} / {status.total_tracks} played
+                  </span>
+                  <span style={{ flex: 1 }} />
+                  {isPlaying && (
+                    <>
+                      <button onClick={skip} style={btnStyle('#4a6cf7')}>Skip</button>
+                      <button onClick={stopSession} style={btnStyle('#e74c3c')}>Stop</button>
+                    </>
+                  )}
+                </div>
+              </>
+            ) : (
+              <div style={{ display: 'flex', gap: 8 }}>
+                <input
+                  type="text" placeholder="Seed track (optional)"
+                  value={seed} onChange={e => setSeed(e.target.value)}
+                  style={{ ...inputStyle, flex: 1 }}
+                />
+                <button onClick={startSession} style={btnStyle('#4a6cf7')}>Start</button>
               </div>
-              <div style={{ fontSize: 17, color: '#aaa', marginTop: 4 }}>
-                {status.current_track.artist}
-              </div>
-              <div style={{ fontSize: 14, color: '#666', marginTop: 10 }}>
-                {status.played_count} / {status.total_tracks} played
-              </div>
-            </Card>
-          )}
+            )}</Card>
 
-          {/* Start / Stop / Skip */}
-          <Card>
-            <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
-              {!isPlaying ? (
-                <>
-                  <input
-                    type="text" placeholder="Seed track (optional)"
-                    value={seed} onChange={e => setSeed(e.target.value)}
-                    style={{ ...inputStyle, flex: 1 }}
-                  />
-                  <button onClick={startSession} style={btnStyle('#4a6cf7')}>Start</button>
-                </>
-              ) : (
-                <>
-                  <button onClick={skip} style={btnStyle('#4a6cf7')}>Skip</button>
-                  <button onClick={stopSession} style={btnStyle('#e74c3c')}>Stop</button>
-                </>
-              )}
-            </div>
-
-            <Slider
-              label="Next Song Temperature"
-              value={songK} min={1} max={50} step={1}
-              leftLabel="1 (nearest only)"
-              rightLabel="50 (wide exploration)"
-              onChange={updateSongK}
-            />
-
-            <Slider
-              label="Next Set Temperature"
-              value={setDist} min={1} max={20} step={0.5}
-              leftLabel="1× (adjacent)"
-              rightLabel="20× (big jump)"
-              onChange={updateSetDist}
-            />
-          </Card>
-
-          {/* Volume */}
-          <Card>
-            <Slider
-              label="Volume"
-              value={volume} min={0} max={100} step={1}
-              leftLabel="0%" rightLabel="100%"
-              onChange={updateVolume}
-            />
-          </Card>
-
-          {/* Search */}
+          {/* Search & Play */}
           <Card>
             <Label>Search & Play</Label>
             <div style={{ display: 'flex', gap: 8 }}>
@@ -301,6 +275,30 @@ function App() {
                 ))}
               </div>
             )}
+          </Card>
+
+          {/* Temperature + Volume sliders */}
+          <Card>
+            <Slider
+              label="Next Song Temperature"
+              value={songK} min={1} max={50} step={1}
+              leftLabel="1 (nearest only)"
+              rightLabel="50 (wide exploration)"
+              onChange={updateSongK}
+            />
+            <Slider
+              label="Next Set Temperature"
+              value={setDist} min={1} max={20} step={0.5}
+              leftLabel="1× (adjacent)"
+              rightLabel="20× (big jump)"
+              onChange={updateSetDist}
+            />
+            <Slider
+              label="Volume"
+              value={volume} min={0} max={100} step={1}
+              leftLabel="0%" rightLabel="100%"
+              onChange={updateVolume}
+            />
           </Card>
 
           {/* History */}
