@@ -167,6 +167,11 @@ def start_session(req: StartRequest) -> dict:
 @app.post("/api/stop")
 def stop_session() -> dict:
     global _dj, _dj_thread
+    if _dj is not None:
+        try:
+            _dj._sp.pause_playback()
+        except Exception:
+            pass  # device might be unavailable
     _dj = None
     _dj_thread = None
     return {"status": "stopped"}
