@@ -29,20 +29,34 @@ python -m albart.mapview --mode half --view umap
 ### ALBart DJ
 Automated music exploration through embedding space. Plays tracks from your Spotify library, hopping to nearby tracks with occasional longer jumps to fresh territory.
 
+**CLI mode:**
 ```bash
 python -m albart.dj                           # exact mode (default)
 python -m albart.dj --mode listen             # use live audio embedding
 python -m albart.dj --seed "paint it black"   # start from a specific track
+python -m albart.dj --temperature 5           # tight: choose from 5 nearest
 python -m albart.dj --hop-interval 20         # long hop every 20 min
+python -m albart.dj --mood "chill jazz, no metal"  # mood-filtered
 ```
+
+**Web UI mode:**
+```bash
+python -m albart.dj_server                    # API server on :8765
+cd ui && npm run dev                          # React UI on :5173
+```
+The web UI provides live controls: mood text → Claude interpretation → apply, song/set temperature sliders, volume, track search with Next/Now, skip/stop.
 
 **Modes:**
 - `exact` — hops based on the stored preview embedding of each track. Controlled, repeatable.
 - `listen` — hops based on the Listener's live audio embedding. Reflects what the song actually sounds like but may drift at song boundaries.
 
+**Mood filtering:**
+Describe the vibe in plain text (e.g., "hipster party, indie electronic, no opera"). Claude expands this into ~20 genre descriptors, which are embedded via CLAP into the same 512D space as the audio. Tracks are pre-tagged as in-mood or out-of-mood based on cosine similarity. The DJ only hops to in-mood tracks. Mood strictness is adjustable live via the web UI.
+
 **Overrides:**
 - Change the track in Spotify → DJ detects it and continues from there
 - Click a track in the MapView → DJ plays it and continues from there
+- Search and play via the web UI (Next = queue, Now = interrupt)
 
 ## How They Work Together
 
@@ -131,9 +145,13 @@ The 3D cloud uses a hybrid projection:
 - **OpenGL** renders textured quads at float positions with mipmapping and MSAA
 
 ### DJ Navigation
-- **Normal hops**: picks from the 20 nearest unplayed tracks, weighted by closeness, with artist penalty to avoid same-artist runs
-- **Long hops** (every ~30 min): extrapolates the trajectory of the last two tracks, landing 5× further along in embedding space
+- **Normal hops**: picks from the K nearest unplayed tracks (K = song temperature, 1-50), weighted by closeness, with artist penalty to avoid same-artist runs
+- **Long hops** (every ~30 min): extrapolates the trajectory of the last two tracks, landing N× further along (N = set temperature, 1-20×)
+- **Mood filtering**: tracks pre-tagged as in/out based on CLAP cosine similarity to mood descriptors. The DJ only considers in-mood tracks for both normal and long hops.
 - **Near-duplicate filter**: skips tracks within L2 < 0.01 of recently played (catches remasters)
+
+### Mood Pipeline
+Free text → Claude API (expands into ~20 genre descriptors) → CLAP text embedding (same 512D space as audio) → cosine similarity against all tracks → boolean mask. The CLAP model loads on demand and auto-unloads after 5 min idle.
 
 ## Project Structure
 
@@ -143,6 +161,8 @@ ALBart/
     listener.py              # Entry: python -m albart.listener
     mapview.py               # Entry: python -m albart.mapview
     dj.py                    # Entry: python -m albart.dj
+    dj_server.py             # Entry: python -m albart.dj_server (web API)
+    text_embedder.py         # Lazy-loading CLAP text embedding (for mood)
     utils.py                 # Shared: device selection, config loading
     pipeline/
       run_pipeline.py        # Master pipeline: pull → download → embed → index
@@ -167,6 +187,8 @@ ALBart/
       display_hub75.py       # HUB75 LED panel display
       agc.py                 # Automatic gain control
       startup.py             # Startup animation
+  ui/                        # React frontend (Vite + TypeScript)
+    src/App.tsx              # DJ web UI
   tools/
     build_umap.py            # 2D UMAP projection
     build_umap_5d.py         # 5D UMAP projection
@@ -192,6 +214,8 @@ ALBart/
 | `pygame` + `PyOpenGL` | Display + GPU rendering |
 | `sounddevice` | Audio capture |
 | `numpy` | Everything numerical |
+| `fastapi` + `uvicorn` | DJ web server |
+| `anthropic` | Claude API (mood interpretation, Voronoi labels) |
 
 ## License
 

@@ -80,6 +80,13 @@ Use the `logging` module throughout. No bare `print` statements except in CLI en
 ```
 ALBart/
   albart/
+    listener.py           # Entry: python -m albart.listener
+    mapview.py            # Entry: python -m albart.mapview
+    dj.py                 # Entry: python -m albart.dj
+    dj_server.py          # Entry: python -m albart.dj_server (web API)
+    text_embedder.py      # Lazy-loading CLAP text embedding (mood filtering)
+    utils.py              # Shared helpers: get_device(), load_config()
+    __init__.py
     pipeline/
       __init__.py
       spotify.py          # Spotify API client and top tracks pull
@@ -87,30 +94,39 @@ ALBart/
       embedder.py         # CLAP inference, FAISS index build/save
       database.py         # SQLite schema and CRUD
       preprocess.py       # Image downsampling to 32x32
+      deezer.py           # Deezer preview fallback
+      itunes.py           # iTunes preview fallback
       run_pipeline.py     # CLI entry point: python -m albart.pipeline.run_pipeline
     runtime/
       __init__.py
       audio.py            # Mic capture, circular buffer, threading.Lock
       embedder.py         # Runtime CLAP inference (loads model once at startup)
-      lookup.py           # FAISS query, dwell time computation
+      lookup.py           # FAISS query + alias sampling (single norm index)
       display.py          # Abstract DisplayBackend base class
       display_sim.py      # pygame simulated display (prototype)
       display_hub75.py    # rpi-rgb-led-matrix display (production)
-      loop.py             # Main runtime loop
-      run.py              # CLI entry point: python -m albart.runtime.run
-    utils.py              # Shared helpers: get_device(), load_config()
-    __init__.py
-  data/                   # gitignored
-    db.sqlite
-    faiss.index
-    faiss_ids.npy
-    previews/
-    art_original/
-    art_32/
+      loop.py             # LED display loop
+      run.py              # Listener implementation
+      run_map.py          # MapView implementation
+      neighborhood_display.py # 3D OpenGL neighborhood view
+      map_display.py      # 2D UMAP map view
+      agc.py              # Automatic gain control
+      startup.py          # Startup animation
+  ui/                     # React frontend (Vite + TypeScript)
+    src/App.tsx           # DJ web UI
+  tools/
+    build_umap.py         # 2D UMAP projection
+    build_umap_5d.py      # 5D UMAP projection
+    build_voronoi.py      # Voronoi cluster labels (uses Claude API)
+    build_text_labels.py  # CLAP text embeddings vocabulary
+    dj_simulate.py        # Offline DJ trajectory simulation
+    review_art.py         # 32×32 art inspection
+    reembed_existing.py   # Re-embed tracks (schema migration)
+    archive/              # Diagnostic scripts from development
+  setup_database.py       # One-command database build
   config.yaml
   requirements.txt
-  .gitignore
-  README.md
+  data/                   # gitignored — all generated data
   CLAUDE.md
   albart_spec.md
 ```
@@ -129,7 +145,10 @@ ALBart/
 | `faiss-cpu` | Vector similarity index |
 | `sounddevice` | Mic capture via InputStream callback |
 | `numpy` | Audio buffers, embedding math |
-| `pygame` | Simulated display (macOS prototype) |
+| `pygame` + `PyOpenGL` | Window management + GPU-accelerated rendering |
+| `fastapi` + `uvicorn` | DJ web server |
+| `anthropic` | Claude API (mood interpretation, Voronoi labels) |
+| `umap-learn` | 2D/5D dimensionality reduction |
 | `pyyaml` | Config file loading |
 | `tqdm` | Pipeline progress bars |
 
