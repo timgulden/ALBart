@@ -83,6 +83,7 @@ class TrackInfo(BaseModel):
     track_id: str
     title: str
     artist: str
+    set_start: bool = False
 
 
 class StatusResponse(BaseModel):
@@ -113,6 +114,7 @@ def _track_info(dj: DJ, tid: str) -> TrackInfo:
         track_id=tid,
         title=row["title"] if row else "?",
         artist=row["artist"] if row else "?",
+        set_start=tid in dj._set_starts,
     )
 
 
@@ -138,7 +140,7 @@ def get_status() -> StatusResponse:
     if _dj._history:
         current = _track_info(_dj, _dj._history[-1])
 
-    history = [_track_info(_dj, tid) for tid in reversed(_dj._history[-20:])]
+    history = [_track_info(_dj, tid) for tid in reversed(_dj._history)]
 
     # Grab playback progress
     progress_ms = 0

@@ -122,6 +122,7 @@ class DJ:
         self._next_pick: str | None = None       # picked but not yet played
         self._monitored_track: str | None = None  # Spotify track ID we're watching
         self._pending_hop_type: str | None = None
+        self._set_starts: set[str] = set()  # track IDs that began a new set
         self._rng = np.random.default_rng()
 
         # ── Mood filtering ──────────────────────────────────────────────
@@ -453,6 +454,7 @@ class DJ:
         hop_label = ""
         if hasattr(self, "_pending_hop_type") and self._pending_hop_type == "LONG":
             hop_label = " ═══ LONG HOP"
+            self._set_starts.add(tid)
             self._pending_hop_type = None
         logger.info(
             "▶  %s  [played: %d / %d]%s",

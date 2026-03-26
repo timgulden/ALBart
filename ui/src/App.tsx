@@ -373,15 +373,28 @@ function App() {
           {/* History */}
           {status?.history && status.history.length > 1 && (
             <Card>
-              <Label>Recent History</Label>
-              {status.history.slice(1, 12).map((t, i) => (
-                <div key={`${t.track_id}-${i}`} style={{
-                  padding: '4px 0', fontSize: 15, color: '#999',
-                  borderBottom: '1px solid #1a1a2e',
-                }}>
-                  {t.title} — {t.artist}
-                </div>
-              ))}
+              <Label>Session History</Label>
+              <div style={{ maxHeight: 400, overflowY: 'auto' }}>
+                {status.history.slice(1).map((t, i) => (
+                  <div key={`${t.track_id}-${i}`}>
+                    {t.set_start && (
+                      <div style={{
+                        padding: '6px 0', fontSize: 12, color: '#4a6cf7',
+                        fontWeight: 600, letterSpacing: 1,
+                        borderTop: i > 0 ? '1px solid #2a3050' : 'none',
+                        marginTop: i > 0 ? 6 : 0,
+                      }}>
+                        ── NEW SET ──
+                      </div>
+                    )}
+                    <div style={{
+                      padding: '3px 0', fontSize: 14, color: '#999',
+                    }}>
+                      {t.title} — {t.artist}
+                    </div>
+                  </div>
+                ))}
+              </div>
             </Card>
           )}
         </div>
