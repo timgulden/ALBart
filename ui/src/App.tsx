@@ -33,7 +33,6 @@ function App() {
   const [moodApplied, setMoodApplied] = useState(false)
   const [moodThreshold, setMoodThreshold] = useState(0.35)
   const [volume, setVolume] = useState(50)
-  const [devices, setDevices] = useState<{id:string,name:string,type:string,is_active:boolean,volume:number}[]>([])
   const [error, setError] = useState('')
 
   // Poll status
@@ -150,14 +149,13 @@ function App() {
     })
   }, [])
 
-  // Fetch devices periodically
+  // Sync volume from active device
   useEffect(() => {
     const poll = setInterval(async () => {
       try {
         const res = await fetch(`${API}/devices`)
         if (res.ok) {
           const data = await res.json()
-          setDevices(data)
           const active = data.find((d: any) => d.is_active)
           if (active) setVolume(active.volume)
         }
@@ -173,10 +171,6 @@ function App() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ volume: v }),
     })
-  }, [])
-
-  const switchDevice = useCallback(async (deviceId: string) => {
-    await fetch(`${API}/device/${deviceId}`, { method: 'POST' })
   }, [])
 
   const playNow = useCallback(async (trackId: string) => {
@@ -267,7 +261,7 @@ function App() {
             />
           </Card>
 
-          {/* Volume & Device */}
+          {/* Volume */}
           <Card>
             <Slider
               label="Volume"
@@ -275,28 +269,6 @@ function App() {
               leftLabel="0%" rightLabel="100%"
               onChange={updateVolume}
             />
-            {devices.length > 0 && (
-              <div>
-                <Label>Output Device</Label>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                  {devices.map(d => (
-                    <button
-                      key={d.id}
-                      onClick={() => switchDevice(d.id)}
-                      style={{
-                        padding: '8px 12px', borderRadius: 8, border: 'none',
-                        background: d.is_active ? '#2a3f5f' : '#0f1729',
-                        color: d.is_active ? '#8ab4f8' : '#888',
-                        fontSize: 14, cursor: 'pointer', textAlign: 'left',
-                        borderLeft: d.is_active ? '3px solid #4a6cf7' : '3px solid transparent',
-                      }}
-                    >
-                      {d.name} <span style={{ fontSize: 11, color: '#555' }}>({d.type})</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
           </Card>
 
           {/* Search */}
