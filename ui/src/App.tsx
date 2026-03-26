@@ -245,6 +245,16 @@ function App() {
               </div>
             )}</Card>
 
+          {/* Volume */}
+          <Card>
+            <Slider
+              label="Volume"
+              value={volume} min={0} max={100} step={1}
+              leftLabel="0%" rightLabel="100%"
+              onChange={updateVolume}
+            />
+          </Card>
+
           {/* Search & Play */}
           <Card>
             <Label>Search & Play</Label>
@@ -275,30 +285,6 @@ function App() {
                 ))}
               </div>
             )}
-          </Card>
-
-          {/* Temperature + Volume sliders */}
-          <Card>
-            <Slider
-              label="Next Song Temperature"
-              value={songK} min={1} max={50} step={1}
-              leftLabel="1 (nearest only)"
-              rightLabel="50 (wide exploration)"
-              onChange={updateSongK}
-            />
-            <Slider
-              label="Next Set Temperature"
-              value={setDist} min={1} max={20} step={0.5}
-              leftLabel="1× (adjacent)"
-              rightLabel="20× (big jump)"
-              onChange={updateSetDist}
-            />
-            <Slider
-              label="Volume"
-              value={volume} min={0} max={100} step={1}
-              leftLabel="0%" rightLabel="100%"
-              onChange={updateVolume}
-            />
           </Card>
 
           {/* History */}
@@ -393,6 +379,25 @@ function App() {
                 onChange={updateMoodThreshold}
               />
             </div>
+          </Card>
+
+          {/* Temperature */}
+          <Card>
+            <Label>Temperature</Label>
+            <Slider
+              label="Next Song"
+              value={songK} min={1} max={50} step={1}
+              leftLabel="1 (nearest only)"
+              rightLabel="50 (wide exploration)"
+              onChange={updateSongK}
+            />
+            <Slider
+              label="Next Set"
+              value={setDist} min={1} max={20} step={0.5}
+              leftLabel="1× (adjacent)"
+              rightLabel="20× (big jump)"
+              onChange={updateSetDist}
+            />
           </Card>
         </div>
       </div>
