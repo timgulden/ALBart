@@ -474,10 +474,12 @@ class DJ:
         return None
 
     def _get_remaining_ms(self) -> int:
-        """Get remaining playback time in ms. Returns 0 if unknown."""
+        """Get remaining playback time in ms. Returns 0 if paused or unknown."""
         try:
             pb = self._sp.current_playback()
             if pb and pb.get("item"):
+                if not pb.get("is_playing"):
+                    return 0  # paused — treat as ended
                 duration = pb["item"]["duration_ms"]
                 progress = pb.get("progress_ms", 0)
                 return max(0, duration - progress)
