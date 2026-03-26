@@ -315,8 +315,8 @@ class DJ:
         Mood filter rejects tracks outside the mood region.
         Artist penalty avoids same-artist runs.
         """
-        # Temperature scales the candidate pool: 0.1 → 3 tracks, 1.0 → 20
-        k = max(3, int(NORMAL_HOP_K * self._temperature))
+        # Temperature scales the candidate pool: 0 → 1 track, 1.0 → 20
+        k = max(1, int(NORMAL_HOP_K * self._temperature)) if self._temperature > 0 else 1
         candidates = self._find_nearest_unplayed(current_emb, k=k)
         if not candidates:
             logger.warning("No unplayed tracks found nearby!")
@@ -338,8 +338,10 @@ class DJ:
         dists = np.array([c[1] for c in candidates])
 
         # Temperature also sharpens/softens the distance weighting
-        # Low temp → sharp (nearest dominates), high temp → flat (more random)
-        sharpness = 1.0 / max(self._temperature, 0.05)
+        # 0 → deterministic (nearest only), low → sharp, high → flat
+        if self._temperature <= 0:
+            return tids[0]  # always pick nearest
+        sharpness = 1.0 / self._temperature
         weights = (1.0 / np.maximum(dists, 1e-8)) ** sharpness
 
         # Penalize same artist as recent tracks
@@ -691,8 +693,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--temperature", type=float, default=0.5,
-        help="Exploration temperature: 0.1 = tight (nearest few), "
-             "1.0 = wide (top 20). Default: 0.5",
+        help="Exploration temperature: 0 = deterministic (always nearest), "
+             "0.1 = tight (nearest 3), 1.0 = wide (top 20). Default: 0.5",
     )
     parser.add_argument(
         "--mood", type=str, default=None,
