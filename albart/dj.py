@@ -132,6 +132,8 @@ class DJ:
         self._mood_text: str | None = None
         self._mood_descriptors: list[str] = []
         self._mood_threshold: float = 0.35  # cosine sim; higher = stricter
+        # Pre-computed mood mask: True = in-mood for each track
+        self._mood_mask: np.ndarray | None = None  # (N,) bool
         if mood:
             self._setup_mood(mood)
 
@@ -199,33 +201,34 @@ class DJ:
         if self._mood_embs is None and self._mood_embs_neg is None:
             logger.warning("No mood descriptors — filter disabled")
 
-    def _is_in_mood(self, tid: str) -> bool:
-        """Check if a track is within the mood-defined region.
+        self._recompute_mood_mask()
 
-        A track passes if:
-          1. It matches at least one positive descriptor (above threshold)
-          2. It does NOT match any negative descriptor (above threshold)
+    def _recompute_mood_mask(self) -> None:
+        """Pre-compute boolean mask for all tracks: True = in-mood.
+
+        Called when mood descriptors or threshold change.
         """
         if self._mood_embs is None and self._mood_embs_neg is None:
-            return True
-        emb = self._get_embedding(tid)
-        if emb is None:
-            return True
-        emb_norm = emb / (np.linalg.norm(emb) + 1e-8)
+            self._mood_mask = None
+            return
 
-        # Must match at least one positive descriptor
+        emb_normed = self._embeddings / (
+            np.linalg.norm(self._embeddings, axis=1, keepdims=True) + 1e-8
+        )
+        mask = np.ones(self._N, dtype=bool)
+
         if self._mood_embs is not None:
-            pos_sims = self._mood_embs @ emb_norm
-            if float(np.max(pos_sims)) < self._mood_threshold:
-                return False
+            pos_sims = emb_normed @ self._mood_embs.T
+            mask &= pos_sims.max(axis=1) > self._mood_threshold
 
-        # Must NOT match any negative descriptor
         if self._mood_embs_neg is not None:
-            neg_sims = self._mood_embs_neg @ emb_norm
-            if float(np.max(neg_sims)) > self._mood_threshold:
-                return False
+            neg_sims = emb_normed @ self._mood_embs_neg.T
+            mask &= neg_sims.max(axis=1) <= self._mood_threshold
 
-        return True
+        self._mood_mask = mask
+        n_in = int(mask.sum())
+        logger.info("Mood mask: %d/%d tracks in-mood (%.0f%%)",
+                    n_in, self._N, 100 * n_in / self._N)
 
     def _start_udp_listener(self, port: int) -> None:
         """Background thread that receives embeddings from the main engine."""
@@ -268,11 +271,16 @@ class DJ:
     def _find_nearest_unplayed(
         self, emb: np.ndarray, k: int = 10
     ) -> list[tuple[str, float]]:
-        """Find K nearest unplayed tracks by L2 distance.
+        """Find K nearest unplayed, in-mood tracks by L2 distance.
 
-        Skips near-duplicates (L2 < 0.01) of any already-played track.
+        Skips: played, near-duplicates, and out-of-mood tracks.
+        Searches wide enough to fill K results from the filtered pool.
         """
-        search_k = min(k * 5 + len(self._played), self._N)
+        # Search wider to account for played + mood-filtered tracks
+        n_out = len(self._played)
+        if self._mood_mask is not None:
+            n_out += int((~self._mood_mask).sum())
+        search_k = min(k * 3 + n_out, self._N)
         q = emb.reshape(1, -1).astype(np.float32)
         dists, idxs = self._index.search(q, search_k)
 
@@ -282,6 +290,9 @@ class DJ:
                 continue
             tid = self._id_list[idx]
             if tid in self._played:
+                continue
+            # Mood filter: skip out-of-mood tracks (pre-computed mask)
+            if self._mood_mask is not None and not self._mood_mask[idx]:
                 continue
             l2 = float(np.sqrt(max(dist, 0)))
             # Skip near-duplicates of played tracks (same recording, different remaster)
@@ -324,21 +335,6 @@ class DJ:
         if not candidates:
             logger.warning("No unplayed tracks found nearby!")
             return None
-
-        # Mood filter: reject candidates outside the mood region.
-        # Widen the search progressively if needed.
-        if self._mood_embs is not None or self._mood_embs_neg is not None:
-            candidates = [(t, d) for t, d in candidates if self._is_in_mood(t)]
-            if not candidates:
-                for wider_k in [50, 200, 500, self._N]:
-                    logger.info("Widening mood search to k=%d", wider_k)
-                    wider = self._find_nearest_unplayed(current_emb, k=wider_k)
-                    candidates = [(t, d) for t, d in wider if self._is_in_mood(t)]
-                    if candidates:
-                        break
-            if not candidates:
-                logger.warning("No in-mood tracks in entire library!")
-                return None
 
         recent_artists = self._recent_artists(3)
 
@@ -391,17 +387,8 @@ class DJ:
             np.float32
         )  # re-normalize (CLAP embeddings are L2-normalized)
 
-        # Find nearest unplayed to the target point, filtered by mood
+        # Find nearest unplayed to the target (mood mask applied inside)
         candidates = self._find_nearest_unplayed(target, k=NORMAL_HOP_K)
-        if self._mood_embs is not None or self._mood_embs_neg is not None:
-            candidates = [(t, d) for t, d in candidates if self._is_in_mood(t)]
-            if not candidates:
-                for wider_k in [50, 200, 500]:
-                    logger.info("Long hop: widening mood search to k=%d", wider_k)
-                    wider = self._find_nearest_unplayed(target, k=wider_k)
-                    candidates = [(t, d) for t, d in wider if self._is_in_mood(t)]
-                    if candidates:
-                        break
         if not candidates:
             return self._pick_normal_hop(emb_curr)
 

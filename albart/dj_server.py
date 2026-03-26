@@ -186,6 +186,7 @@ def set_mood_threshold(req: MoodThresholdUpdate) -> dict:
     if _dj is None:
         return {"error": "No active session"}
     _dj._mood_threshold = max(0.1, min(0.6, req.threshold))
+    _dj._recompute_mood_mask()
     logger.info("Mood threshold set to %.2f", _dj._mood_threshold)
     return {"threshold": _dj._mood_threshold}
 
@@ -263,6 +264,7 @@ def apply_mood(req: DescriptorsUpdate) -> dict:
 
         _dj._mood_embs = embed_texts(positive) if positive else None
         _dj._mood_embs_neg = embed_texts(negative) if negative else None
+        _dj._recompute_mood_mask()
 
         logger.info("Mood applied: %d positive, %d negative descriptors",
                     len(positive), len(negative))
