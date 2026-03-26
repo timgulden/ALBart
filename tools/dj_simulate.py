@@ -1,7 +1,7 @@
-"""Simulate DJ mode trajectories without playing anything.
+"""Simulate DJ trajectories without playing anything.
 
 Prints 50 tracks: 10 per set with long hops between sets.
-Uses the same hop logic as dj_mode.py (via DJ class).
+Uses the same hop logic as ALBart DJ (via DJ class).
 
 Usage:
     python tools/dj_simulate.py
@@ -17,7 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from tools.dj_mode import DJ, find_seed_track  # noqa: E402
+from albart.dj import DJ, find_seed_track  # noqa: E402
 
 
 def main() -> None:

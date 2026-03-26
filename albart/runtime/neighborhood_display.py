@@ -190,7 +190,7 @@ class NeighborhoodDisplay:
         self._consecutive_far: int = 0
 
         self._ppu: float = 1695.0
-        self._target_on_screen: int = 500
+        self._target_on_screen: int = 300
 
         self._all_proj:        Optional[np.ndarray] = None
         self._all_proj_smooth: Optional[np.ndarray] = None
@@ -555,6 +555,7 @@ class NeighborhoodDisplay:
         tpx_base = np.where(z < 0, persp_size, np.minimum(persp_size, bg_size))
 
         tpx = np.maximum(1.0, tpx_base)
+        half = tpx / 2.0
 
         # Alpha fade near depth boundaries (prevents pop-in/pop-out)
         # Fade out near max_z (back edge)
@@ -564,22 +565,57 @@ class NeighborhoodDisplay:
         # transparent.  Fully opaque at z=0, fully transparent at z = -fade_front.
         fade_front = self._z_near * 0.8  # fade quickly — foreground covers are large
         front_alpha = np.clip(z / fade_front + 1.0, 0.0, 1.0)
-        # Axis-proximity fade: foreground tracks near the z-axis (camera-to-cover
-        # line) become transparent so the central cover always shows through.
-        # Tracks further from the axis stay opaque.
-        r_xy = np.sqrt(rel[:, 0] ** 2 + rel[:, 1] ** 2)
-        cover_half_3d = float(self._base_thumb_px) * scale_at_z0 / (2.0 * self._ppu)
-        cyl_radius_3d = cover_half_3d * 3.0  # fade zone = 3× cover radius
-        axis_alpha = np.where(
-            z < 0,  # only apply to foreground
-            np.clip(r_xy / max(cyl_radius_3d, 1e-8), 0.0, 1.0),
-            1.0,
+        # Frame occlusion: foreground tracks fade as they approach the central
+        # cover.  An outer box (1.5× frame) starts the fade; the inner box
+        # (the frame itself) is fully transparent.
+        frame_half = float(self._base_thumb_px) * scale_at_z0 / 2.0 + 4.0
+        outer_half = frame_half * 1.5
+
+        # Track bounding box edges
+        track_l = sx - half
+        track_r = sx + half
+        track_t = sy - half
+        track_b = sy + half
+
+        # Compute penetration into the outer box (0 = outside, 1 = at inner box)
+        # For each axis: how far has the track entered the fade zone?
+        # The fade zone is from outer_half to frame_half.
+        fade_w = outer_half - frame_half  # width of fade zone
+
+        # X penetration: how far past the outer edge is the closest track edge?
+        x_pen_left  = (self._cx - frame_half) - track_l   # >0 when left edge past frame-left → but we want from outer
+        x_pen_right = track_r - (self._cx + frame_half)
+        # Recompute: distance INTO the fade zone from the outer boundary
+        gap_left  = (self._cx - frame_half) - track_r  # gap between track right edge and frame left edge
+        gap_right = track_l - (self._cx + frame_half)  # gap between track left edge and frame right edge
+        gap_top   = (self._cy - frame_half) - track_b
+        gap_bot   = track_t - (self._cy + frame_half)
+
+        # Minimum gap in each axis (negative = overlapping)
+        gap_x = np.maximum(gap_left, gap_right)   # closest edge in X
+        gap_y = np.maximum(gap_top, gap_bot)       # closest edge in Y
+
+        # A track overlaps the OUTER box if gap_x < fade_w AND gap_y < fade_w
+        # Penetration fraction: 0 at outer edge, 1 at inner edge
+        pen_x = np.clip(1.0 - gap_x / max(float(fade_w), 1.0), 0.0, 1.0)
+        pen_y = np.clip(1.0 - gap_y / max(float(fade_w), 1.0), 0.0, 1.0)
+
+        # Combined: both axes must penetrate for any fade
+        penetration = pen_x * pen_y
+
+        # Apply to all foreground tracks EXCEPT the nearest (central cover).
+        r_all = np.sqrt(rel[:, 0]**2 + rel[:, 1]**2 + rel[:, 2]**2)
+        central_idx = int(np.argmin(r_all))
+        is_foreground = z < 0
+        is_central = np.zeros(len(z), dtype=bool)
+        is_central[central_idx] = True
+        frame_alpha = np.where(
+            is_foreground & ~is_central, 1.0 - penetration, 1.0
         )
 
-        track_alpha = back_alpha * front_alpha * axis_alpha
+        track_alpha = back_alpha * front_alpha * frame_alpha
 
         # On-screen mask: must be in front AND visible
-        half = tpx / 2.0
         on_scr = (
             in_front & (track_alpha > 0.01) &
             (sx + half >= 0) & (sx - half < self._canvas_w) &
@@ -604,14 +640,17 @@ class NeighborhoodDisplay:
 
 
         # ── Draw tracks + glow frame + label layered at Z=0 ──────────────
-        # Background tracks (z > 0) first, then glow/label, then foreground
+        # Background tracks (z > 0) first, then glow/label, then foreground,
+        # then central cover last (always on top).
         self._update_label_texture()
         glow_drawn = False
         for i in order:
+            if i == central_idx:
+                continue  # draw last
             # Insert glow frame + label at the Z=0 boundary
             if not glow_drawn and z[i] <= 0:
-                self._draw_label()   # text behind glow frame
-                self._draw_sphere()  # glow on top of text background
+                self._draw_label()
+                self._draw_sphere()
                 glow_drawn = True
             tid = self._id_list[i]
             tex = self._get_track_texture(tid)
@@ -623,6 +662,16 @@ class NeighborhoodDisplay:
         if not glow_drawn:
             self._draw_label()
             self._draw_sphere()
+
+        # Central cover always drawn last (on top of everything)
+        if central_idx in set(vis):
+            tid = self._id_list[central_idx]
+            tex = self._get_track_texture(tid)
+            if tex:
+                h = float(tpx[central_idx]) / 2.0
+                self._draw_quad(tex, float(sx[central_idx]),
+                                float(sy[central_idx]), h, h, 1.0,
+                                border=True)
 
         # ── Tooltip ───────────────────────────────────────────────────────
         self._draw_tooltip()
