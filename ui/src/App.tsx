@@ -126,7 +126,7 @@ function App() {
       const res = await fetch(`${API}/mood`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mood }),
+        body: JSON.stringify({ descriptors: moodDescriptors }),
       })
       const data = await res.json()
       if (data.error) {
@@ -137,7 +137,7 @@ function App() {
     } catch {
       setError('Apply mood failed — is the DJ running?')
     }
-  }, [mood])
+  }, [moodDescriptors])
 
   const updateMoodThreshold = useCallback(async (t: number) => {
     setMoodThreshold(t)
@@ -313,27 +313,21 @@ function App() {
             }}>
               {moodDescriptors.length > 0 ? (
                 <>
-                  <div style={{ fontSize: 13, color: '#667', marginBottom: 8 }}>
-                    Claude's interpretation:
+                  <div style={{ fontSize: 13, color: '#667', marginBottom: 6 }}>
+                    Descriptors (editable):
                   </div>
-                  <div style={{ lineHeight: 2.0 }}>
-                    {moodDescriptors.map((d, i) => {
-                      const isNot = d.toUpperCase().startsWith('NOT:')
-                      return (
-                        <span key={i} style={{
-                          display: 'inline-block',
-                          background: isNot ? '#3d1f1f' : '#1f2d3d',
-                          borderRadius: 5,
-                          padding: '3px 10px',
-                          margin: '2px 4px 2px 0',
-                          color: isNot ? '#e88' : '#8ab4f8',
-                          fontSize: 13,
-                        }}>
-                          {d}
-                        </span>
-                      )
-                    })}
-                  </div>
+                  <textarea
+                    rows={8}
+                    value={moodDescriptors.join('\n')}
+                    onChange={e => {
+                      setMoodDescriptors(e.target.value.split('\n'))
+                      setMoodApplied(false)
+                    }}
+                    style={{
+                      ...inputStyle, width: '100%', fontSize: 13,
+                      lineHeight: 1.6, resize: 'vertical',
+                    }}
+                  />
                 </>
               ) : (
                 <div style={{ fontSize: 14, color: '#444', fontStyle: 'italic' }}>

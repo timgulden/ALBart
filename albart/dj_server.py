@@ -242,17 +242,31 @@ def interpret_mood(req: MoodUpdate) -> dict:
         return {"error": str(e)}
 
 
+class DescriptorsUpdate(BaseModel):
+    descriptors: list[str]
+
+
 @app.put("/api/mood")
-def apply_mood(req: MoodUpdate) -> dict:
-    """Apply mood filter to the running DJ."""
+def apply_mood(req: DescriptorsUpdate) -> dict:
+    """Apply mood filter from edited descriptors (no Claude call)."""
     if _dj is None:
         return {"error": "No active session — start the DJ first"}
     try:
-        _dj._setup_mood(req.mood)
-        return {
-            "status": "mood applied",
-            "descriptors": _dj._mood_descriptors,
-        }
+        from albart.text_embedder import embed_texts
+
+        lines = [ln.strip() for ln in req.descriptors if ln.strip()]
+        _dj._mood_descriptors = lines
+        _dj._mood_text = "(edited)"
+
+        positive = [ln for ln in lines if not ln.upper().startswith("NOT:")]
+        negative = [ln[4:].strip() for ln in lines if ln.upper().startswith("NOT:")]
+
+        _dj._mood_embs = embed_texts(positive) if positive else None
+        _dj._mood_embs_neg = embed_texts(negative) if negative else None
+
+        logger.info("Mood applied: %d positive, %d negative descriptors",
+                    len(positive), len(negative))
+        return {"status": "mood applied", "descriptors": lines}
     except Exception as e:
         return {"error": str(e)}
 
