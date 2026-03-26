@@ -332,18 +332,28 @@ def queue_next(track_id: str) -> dict:
     return {"status": "queued", "track": _dj._track_name(track_id)}
 
 
+def _normalize_search(s: str) -> str:
+    """Normalize for fuzzy matching: lowercase, collapse dashes/punctuation."""
+    import re
+    s = s.lower()
+    s = s.replace("–", "-").replace("—", "-").replace("'", "'").replace("'", "'")
+    s = re.sub(r'[.\-_/\\]+', ' ', s)  # dots, dashes, underscores → spaces
+    s = re.sub(r'\s+', ' ', s).strip()
+    return s
+
+
 @app.get("/api/search")
 def search_tracks(q: str, limit: int = 10) -> list[TrackInfo]:
     if _dj is None:
         return []
     results = []
-    q_lower = q.lower()
+    q_norm = _normalize_search(q)
     for tid, row in _dj._db.items():
         if tid not in _dj._id_to_idx:
             continue
-        title = (row["title"] or "").lower()
-        artist = (row["artist"] or "").lower()
-        if q_lower in title or q_lower in artist:
+        title = _normalize_search(row["title"] or "")
+        artist = _normalize_search(row["artist"] or "")
+        if q_norm in title or q_norm in artist:
             results.append(TrackInfo(
                 track_id=tid,
                 title=row["title"] or "",
