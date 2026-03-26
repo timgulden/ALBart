@@ -26,7 +26,7 @@ from OpenGL.GL import *  # noqa: F403,F401
 from PIL import Image
 
 from albart.pipeline.database import DB_PATH, get_connection
-from albart.pipeline.embedder import FAISS_RAW_INDEX_PATH, FAISS_RAW_IDS_PATH
+from albart.pipeline.embedder import FAISS_NORM_IDS_PATH
 from albart.utils import DATA_DIR
 
 logger = logging.getLogger(__name__)
@@ -77,7 +77,7 @@ class NeighborhoodDisplay:
 
         # ── Load embeddings ────────────────────────────────────────────────
         logger.info("Loading embeddings...")
-        faiss_ids = np.load(str(FAISS_RAW_IDS_PATH), allow_pickle=True)
+        faiss_ids = np.load(str(FAISS_NORM_IDS_PATH), allow_pickle=True)
         self._id_list: list[str] = [str(t) for t in faiss_ids]
         self._N = len(self._id_list)
 
