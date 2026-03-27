@@ -172,6 +172,10 @@ def start_session(req: StartRequest) -> dict:
     global _dj, _dj_thread
 
     with _dj_lock:
+        # Stop previous session if running
+        if _dj is not None:
+            _dj._stop_requested = True
+
         _dj = DJ(
             hop_interval_minutes=req.hop_interval,
             hop_multiplier=req.set_distance,
@@ -200,10 +204,11 @@ def start_session(req: StartRequest) -> dict:
 def stop_session() -> dict:
     global _dj, _dj_thread
     if _dj is not None:
+        _dj._stop_requested = True
         try:
             _dj._sp.pause_playback()
         except Exception:
-            pass  # device might be unavailable
+            pass
     _dj = None
     _dj_thread = None
     return {"status": "stopped"}

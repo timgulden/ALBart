@@ -123,6 +123,7 @@ class DJ:
         self._monitored_track: str | None = None  # Spotify track ID we're watching
         self._pending_hop_type: str | None = None
         self._set_starts: set[str] = set()  # track IDs that began a new set
+        self._stop_requested: bool = False
         self._rng = np.random.default_rng()
         # Cached playback state (updated by the DJ poll loop, read by the server)
         self._cached_progress_ms: int = 0
@@ -560,7 +561,7 @@ class DJ:
         self._last_hop_time = time.monotonic()
 
         try:
-            while True:
+            while not self._stop_requested:
                 time.sleep(5)  # poll Spotify API every 5 seconds
 
                 # Keep the map display updated with current track's embedding
