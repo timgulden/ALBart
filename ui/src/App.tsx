@@ -194,20 +194,8 @@ function App() {
     })
   }, [seekPos, status])
 
-  // Sync volume from active device
-  useEffect(() => {
-    const poll = setInterval(async () => {
-      try {
-        const res = await fetch(`${API}/devices`)
-        if (res.ok) {
-          const data = await res.json()
-          const active = data.find((d: any) => d.is_active)
-          if (active) setVolume(active.volume)
-        }
-      } catch { /* ignore */ }
-    }, 5000)
-    return () => clearInterval(poll)
-  }, [])
+  // No device polling — volume is set locally, not synced from Spotify
+  // (avoids extra API calls that contribute to rate limiting)
 
   const updateVolume = useCallback(async (v: number) => {
     setVolume(v)

@@ -124,6 +124,10 @@ class DJ:
         self._pending_hop_type: str | None = None
         self._set_starts: set[str] = set()  # track IDs that began a new set
         self._rng = np.random.default_rng()
+        # Cached playback state (updated by the DJ poll loop, read by the server)
+        self._cached_progress_ms: int = 0
+        self._cached_duration_ms: int = 0
+        self._cached_progress_time: float = 0.0  # monotonic time of last update
 
         # ── Mood filtering ──────────────────────────────────────────────
         # mood_embs: (M, 512) CLAP text embeddings defining "in-bounds" space
@@ -489,31 +493,35 @@ class DJ:
         except Exception as e:
             logger.warning("Map broadcast failed: %s", e)
 
-    def _get_current_spotify_track(self) -> str | None:
-        """Get the currently playing Spotify track ID (None if nothing)."""
-        try:
-            pb = self._sp.current_playback()
-            if pb and pb.get("is_playing") and pb.get("item"):
-                return pb["item"]["id"]
-            else:
-                pass  # normal between-track gap
-        except Exception as e:
-            logger.warning("Could not get Spotify playback: %s", e)
-        return None
-
-    def _get_remaining_ms(self) -> int:
-        """Get remaining playback time in ms. Returns 0 if paused or unknown."""
+    def _poll_spotify(self) -> dict | None:
+        """Single API call to get playback state. Caches progress/duration."""
         try:
             pb = self._sp.current_playback()
             if pb and pb.get("item"):
-                if not pb.get("is_playing"):
-                    return 0  # paused — treat as ended
-                duration = pb["item"]["duration_ms"]
-                progress = pb.get("progress_ms", 0)
-                return max(0, duration - progress)
-        except Exception:
-            pass
-        return 0
+                self._cached_progress_ms = pb.get("progress_ms", 0)
+                self._cached_duration_ms = pb["item"].get("duration_ms", 0)
+                self._cached_progress_time = time.monotonic()
+            return pb
+        except Exception as e:
+            logger.warning("Spotify poll error: %s", e)
+            return None
+
+    def _get_current_spotify_track(self) -> str | None:
+        """Get the currently playing Spotify track ID (None if nothing)."""
+        pb = self._poll_spotify()
+        if pb and pb.get("is_playing") and pb.get("item"):
+            return pb["item"]["id"]
+        return None
+
+    def _get_remaining_ms(self) -> int:
+        """Get remaining playback time from cached state. No extra API call."""
+        # Estimate from cache + elapsed time
+        if self._cached_duration_ms <= 0:
+            return 0
+        elapsed = time.monotonic() - self._cached_progress_time
+        estimated_progress = self._cached_progress_ms + int(elapsed * 1000)
+        remaining = self._cached_duration_ms - estimated_progress
+        return max(0, remaining)
 
     def _check_override(self) -> str | None:
         """Check if the map display sent a click-to-play override."""

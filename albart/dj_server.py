@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import logging
 import threading
+import time
 from typing import Optional
 
 import uvicorn
@@ -142,16 +143,12 @@ def get_status() -> StatusResponse:
 
     history = [_track_info(_dj, tid) for tid in reversed(_dj._history)]
 
-    # Grab playback progress
-    progress_ms = 0
-    duration_ms = 0
-    try:
-        pb = _dj._sp.current_playback()
-        if pb and pb.get("item"):
-            progress_ms = pb.get("progress_ms", 0)
-            duration_ms = pb["item"].get("duration_ms", 0)
-    except Exception:
-        pass
+    # Progress from cache (no API call — DJ loop updates this every 5s)
+    elapsed = time.monotonic() - _dj._cached_progress_time
+    progress_ms = _dj._cached_progress_ms + int(elapsed * 1000)
+    duration_ms = _dj._cached_duration_ms
+    if progress_ms > duration_ms:
+        progress_ms = duration_ms
 
     return StatusResponse(
         playing=_dj_thread is not None and _dj_thread.is_alive(),
