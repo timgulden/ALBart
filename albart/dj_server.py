@@ -324,6 +324,21 @@ def seek_track(req: SeekRequest) -> dict:
         return {"error": str(e)}
 
 
+@app.post("/api/new_set")
+def new_set() -> dict:
+    """Force a long hop — start a new set immediately."""
+    if _dj is None:
+        return {"error": "No active session"}
+    next_tid = _dj._pick_long_hop()
+    if next_tid:
+        _dj._pending_hop_type = "LONG"
+        _dj._play_track(next_tid)
+        import time
+        _dj._last_hop_time = time.monotonic()
+        return {"status": "new set", "now_playing": _dj._track_name(next_tid)}
+    return {"error": "Could not find a track for the long hop"}
+
+
 @app.post("/api/skip")
 def skip_track() -> dict:
     if _dj is None:

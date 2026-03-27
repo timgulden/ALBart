@@ -218,6 +218,10 @@ function App() {
     })
   }, [])
 
+  const newSet = useCallback(async () => {
+    await fetch(`${API}/new_set`, { method: 'POST' })
+  }, [])
+
   const playNow = useCallback(async (trackId: string) => {
     await fetch(`${API}/play/${trackId}`, { method: 'POST' })
     setSearchQuery('')
@@ -278,6 +282,11 @@ function App() {
                     </>
                   )}
                 </div>
+                {isPlaying && (
+                  <div style={{ marginTop: 6, textAlign: 'right' }}>
+                    <button onClick={newSet} style={btnStyle('#7c3aed')}>New Set</button>
+                  </div>
+                )}
                 {/* Progress bar */}
                 {duration > 0 && (
                   <div style={{ marginTop: 12 }}>
