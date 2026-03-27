@@ -90,9 +90,12 @@ class DJ:
 
         # ── Spotify client ────────────────────────────────────────────────
         logger.info("Connecting to Spotify...")
-        self._sp = spotipy.Spotify(auth_manager=SpotifyOAuth(
-            scope="user-read-playback-state,user-modify-playback-state",
-        ))
+        self._sp = spotipy.Spotify(
+            auth_manager=SpotifyOAuth(
+                scope="user-read-playback-state,user-modify-playback-state",
+            ),
+            retries=0,  # don't retry on rate limit — handle it ourselves
+        )
         # Verify connection
         user = self._sp.current_user()
         logger.info("Logged in as: %s", user["display_name"])
