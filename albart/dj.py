@@ -34,6 +34,7 @@ import numpy as np
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 
+from albart.orbit import DWELL_DURATION, TRANSIT_STEPS, Orbit
 from albart.pipeline.database import DB_PATH, get_connection
 from albart.pipeline.embedder import FAISS_NORM_INDEX_PATH, FAISS_NORM_IDS_PATH
 from albart.utils import DATA_DIR
@@ -45,6 +46,7 @@ logging.basicConfig(
 logger = logging.getLogger("albart.dj")
 
 EMBEDDINGS_PATH = DATA_DIR / "embeddings_norm.npy"
+UMAP_5D_PATH    = DATA_DIR / "umap_5d.npy"
 OVERRIDE_PATH   = DATA_DIR / "dj_override.txt"
 
 # How many nearby tracks to consider for normal hops (wide enough to find
@@ -80,6 +82,7 @@ class DJ:
         self._id_to_idx = {tid: i for i, tid in enumerate(self._id_list)}
 
         self._embeddings = np.load(str(EMBEDDINGS_PATH)).astype(np.float32)
+        self._umap_5d = np.load(str(UMAP_5D_PATH)).astype(np.float32)
 
         conn = get_connection(DB_PATH)
         rows = conn.execute(
@@ -132,6 +135,8 @@ class DJ:
         self._cached_progress_ms: int = 0
         self._cached_duration_ms: int = 0
         self._cached_progress_time: float = 0.0  # monotonic time of last update
+        self._cached_is_playing: bool = False
+        self._cached_volume: int = -1  # -1 = unknown
 
         # ── Mood filtering ──────────────────────────────────────────────
         # mood_embs: (M, 512) CLAP text embeddings defining "in-bounds" space
@@ -145,6 +150,10 @@ class DJ:
         self._mood_mask: np.ndarray | None = None  # (N,) bool
         if mood:
             self._setup_mood(mood)
+
+        # ── Orbit navigation ─────────────────────────────────────────────
+        self._orbit: Orbit | None = None
+        self._orbit_picked: bool = False  # set by orbit hop, cleared after play
 
         logger.info("Song K=%d  Set multiplier=%.1f×",
                     self._song_k, self.hop_multiplier)
@@ -337,6 +346,118 @@ class DJ:
                 artists.add(r["artist"].lower())
         return artists
 
+    def _get_track_5d(self, tid: str) -> np.ndarray | None:
+        """Get a track's 5D UMAP position."""
+        idx = self._id_to_idx.get(tid)
+        if idx is None:
+            return None
+        return self._umap_5d[idx]
+
+    def _find_nearest_5d(
+        self, target_5d: np.ndarray, exclude_played: bool = True,
+    ) -> str | None:
+        """Find the nearest track to a 5D target point.
+
+        Respects played set, mood mask, and artist penalty (unless the
+        orbit allows same-artist runs).
+        """
+        dists = np.linalg.norm(self._umap_5d - target_5d, axis=1)
+
+        # Apply artist penalty unless orbit allows same-artist
+        skip_artist_penalty = (
+            self._orbit is not None and self._orbit.allow_same_artist
+        )
+        if not skip_artist_penalty:
+            recent_artists = self._recent_artists(3)
+            for idx in range(len(dists)):
+                tid = self._id_list[idx]
+                r = self._db.get(tid)
+                if r and r["artist"] and r["artist"].lower() in recent_artists:
+                    dists[idx] *= 3.0  # push same-artist tracks further away
+
+        order = np.argsort(dists)
+        for idx in order:
+            tid = self._id_list[idx]
+            if exclude_played and tid in self._played:
+                continue
+            if self._mood_mask is not None and not self._mood_mask[idx]:
+                continue
+            return tid
+        return None
+
+    def _pick_orbit_hop(self, current_tid: str, force_transit: bool = False) -> str | None:
+        """Pick the next track based on orbit phase.
+
+        DWELL phase: use normal 512D neighbor hops (stay in genre).
+          - If dwell time expired or force_transit=True, switch to TRANSIT.
+        TRANSIT phase: step 1/N of remaining 512D distance toward the
+          next anchor.  When all steps are done, switch to DWELL at the
+          new anchor.
+
+        Args:
+            current_tid: currently playing track ID
+            force_transit: if True, leave dwell immediately (New Set)
+        """
+        if self._orbit is None:
+            return None
+
+        current_emb = self._get_embedding(current_tid)
+
+        # ── Check phase transitions ──────────────────────────────────
+        if self._orbit.phase == "dwell":
+            if force_transit or self._orbit.should_leave_dwell():
+                self._orbit.start_transit()
+
+        # ── DWELL: normal neighbor hopping ───────────────────────────
+        if self._orbit.phase == "dwell":
+            if current_emb is None:
+                return None
+            result = self._pick_normal_hop(current_emb)
+            if result:
+                self._orbit_picked = True
+                logger.info(
+                    "ORBIT DWELL [%d/%d]: %s → %s  (%.0fs/%.0fs)",
+                    self._orbit.current_index, len(self._orbit.anchors),
+                    self._track_name(current_tid)[:30],
+                    self._track_name(result)[:30],
+                    self._orbit.dwell_elapsed(),
+                    DWELL_DURATION,
+                )
+            return result
+
+        # ── TRANSIT: step through 512D toward next anchor ────────────
+        if current_emb is None:
+            # Unknown track — use anchor embedding as starting point
+            prev_idx = (self._orbit.current_index - 1) % len(self._orbit.anchors)
+            current_emb = self._orbit.anchors[prev_idx].embedding_512
+
+        target_512 = self._orbit.transit_step(current_emb)
+
+        # Find nearest unplayed track to the 512D target
+        result = self._find_nearest_512(target_512)
+
+        if result:
+            self._orbit_picked = True
+            logger.info(
+                "ORBIT TRANSIT [→%d/%d]: %s → %s  step %d/%d",
+                self._orbit.current_index, len(self._orbit.anchors),
+                self._track_name(current_tid)[:30],
+                self._track_name(result)[:30],
+                TRANSIT_STEPS - self._orbit._transit_remaining,
+                TRANSIT_STEPS,
+            )
+
+        # Check if transit is done → start dwell at new anchor
+        if self._orbit.transit_done():
+            self._orbit.start_dwell()
+
+        return result
+
+    def _find_nearest_512(self, target_emb: np.ndarray) -> str | None:
+        """Find nearest unplayed, in-mood track to a 512D target point."""
+        candidates = self._find_nearest_unplayed(target_emb, k=1)
+        return candidates[0][0] if candidates else None
+
     def _pick_normal_hop(self, current_emb: np.ndarray) -> str | None:
         """Pick from nearest unplayed tracks.
 
@@ -360,11 +481,12 @@ class DJ:
         sharpness = 1.0  # 1/distance weighting; K controls exploration width
         weights = (1.0 / np.maximum(dists, 1e-8)) ** sharpness
 
-        # Penalize same artist as recent tracks
-        for i, tid in enumerate(tids):
-            r = self._db.get(tid)
-            if r and r["artist"] and r["artist"].lower() in recent_artists:
-                weights[i] *= 0.1
+        # Penalize same artist as recent tracks (unless orbit allows it)
+        if not (self._orbit is not None and self._orbit.allow_same_artist):
+            for i, tid in enumerate(tids):
+                r = self._db.get(tid)
+                if r and r["artist"] and r["artist"].lower() in recent_artists:
+                    weights[i] *= 0.1
 
         weights /= weights.sum()
 
@@ -468,6 +590,7 @@ class DJ:
             "▶  %s  [played: %d / %d]%s",
             self._track_name(tid), len(self._played), self._N, hop_label,
         )
+        self._orbit_picked = False
         # Broadcast embedding to map display (works without main engine)
         self._broadcast_to_map(tid)
         return True
@@ -498,13 +621,16 @@ class DJ:
             logger.warning("Map broadcast failed: %s", e)
 
     def _poll_spotify(self) -> dict | None:
-        """Single API call to get playback state. Caches progress/duration."""
+        """Single API call to get playback state. Caches progress/duration/volume."""
         try:
             pb = self._sp.current_playback()
             if pb and pb.get("item"):
                 self._cached_progress_ms = pb.get("progress_ms", 0)
                 self._cached_duration_ms = pb["item"].get("duration_ms", 0)
                 self._cached_progress_time = time.monotonic()
+                self._cached_is_playing = pb.get("is_playing", False)
+            if pb and pb.get("device"):
+                self._cached_volume = pb["device"].get("volume_percent", -1)
             return pb
         except Exception as e:
             logger.warning("Spotify poll error: %s", e)
@@ -594,12 +720,24 @@ class DJ:
                     self._last_hop_time = time.monotonic()
                     continue
 
+                # Check playback state — resume if Spotify paused unexpectedly
+                current = self._get_current_spotify_track()
+                if current is None and self._history:
+                    # Spotify is paused or stopped — try to resume
+                    if not self._cached_is_playing:
+                        try:
+                            self._sp.start_playback()
+                            logger.info("Resumed paused playback")
+                            time.sleep(1)  # give Spotify a moment
+                        except Exception as e:
+                            logger.warning("Could not resume playback: %s", e)
+                        continue
+
                 # Check if Spotify track changed (manual override or album advance).
                 # If we have a pending pick, ignore the change — we'll override
                 # it when the current track ends. Only react if the user clearly
                 # took control (changed to a known library track while we had
                 # no pending pick).
-                current = self._get_current_spotify_track()
                 if (current and current != self._history[-1]
                         and self._next_pick is None):
                     if current in self._id_to_idx:
@@ -660,7 +798,12 @@ class DJ:
                 if current_emb is None:
                     continue
 
-                if time_since_hop >= self.hop_interval:
+                if self._orbit is not None:
+                    # Orbit mode: two-phase (dwell + transit)
+                    current_tid = self._history[-1]
+                    next_tid = self._pick_orbit_hop(current_tid)
+                    hop_type = "normal"
+                elif time_since_hop >= self.hop_interval:
                     next_tid = self._pick_long_hop()
                     self._last_hop_time = now
                     hop_type = "LONG"

@@ -6,6 +6,27 @@ interface TrackInfo {
   track_id: string
   title: string
   artist: string
+  set_start?: boolean
+}
+
+interface OrbitAnchorInfo {
+  description: string
+  track_id: string
+  title: string
+  artist: string
+  art_url: string
+  active: boolean
+}
+
+interface OrbitProgress {
+  phase: string  // "dwell" or "transit"
+  current_index: number
+  prev_index: number
+  segment_progress: number
+  dwell_elapsed: number
+  dwell_duration: number
+  transit_remaining: number
+  transit_total: number
 }
 
 interface Status {
@@ -17,9 +38,25 @@ interface Status {
   set_distance: number
   mood_text: string | null
   mood_descriptors: string[]
+  mood_threshold: number
+  mood_in_count: number
   played_count: number
   total_tracks: number
   history: TrackInfo[]
+  volume: number
+  orbit_active: boolean
+  orbit_anchors: OrbitAnchorInfo[]
+  orbit_progress: OrbitProgress | null
+}
+
+interface ProcessStatus {
+  running: boolean
+  pid: number | null
+}
+
+interface SystemStatus {
+  mapview: ProcessStatus
+  listener: ProcessStatus
 }
 
 function App() {
@@ -41,6 +78,13 @@ function App() {
   const [seeking, setSeeking] = useState(false)  // true while user drags
   const [seekPos, setSeekPos] = useState(0)      // position while dragging
   const [error, setError] = useState('')
+  const [system, setSystem] = useState<SystemStatus | null>(null)
+  const [orbitViewerOpen, setOrbitViewerOpen] = useState(false)
+  const [orbitJourney, setOrbitJourney] = useState('')
+  const [orbitDescriptions, setOrbitDescriptions] = useState<string[]>([])
+  const [orbitPending, setOrbitPending] = useState(false)
+  const [orbitApplied, setOrbitApplied] = useState(false)
+  const [orbitAllowSameArtist, setOrbitAllowSameArtist] = useState(false)
 
   // Poll status
   useEffect(() => {
@@ -48,13 +92,20 @@ function App() {
     const poll = async () => {
       while (active) {
         try {
-          const res = await fetch(`${API}/status`)
-          if (active && res.ok) {
-            const data: Status = await res.json()
+          const [statusRes, systemRes] = await Promise.all([
+            fetch(`${API}/status`),
+            fetch(`${API}/system`),
+          ])
+          if (active && statusRes.ok) {
+            const data: Status = await statusRes.json()
             setStatus(data)
             setProgress(data.progress_ms)
             setDuration(data.duration_ms)
             setLastPollTime(Date.now())
+            if (data.volume >= 0) setVolume(data.volume)
+          }
+          if (active && systemRes.ok) {
+            setSystem(await systemRes.json())
           }
         } catch { /* server not running */ }
         await new Promise(r => setTimeout(r, 2000))
@@ -210,6 +261,65 @@ function App() {
     await fetch(`${API}/new_set`, { method: 'POST' })
   }, [])
 
+  const toggleMapView = useCallback(async () => {
+    const running = system?.mapview.running
+    await fetch(`${API}/mapview/${running ? 'stop' : 'start'}`, { method: 'POST' })
+  }, [system])
+
+  const toggleListener = useCallback(async () => {
+    const running = system?.listener.running
+    await fetch(`${API}/listener/${running ? 'stop' : 'start'}`, { method: 'POST' })
+  }, [system])
+
+  const interpretOrbit = useCallback(async () => {
+    if (!orbitJourney.trim()) return
+    setOrbitPending(true)
+    setOrbitApplied(false)
+    setError('')
+    try {
+      const res = await fetch(`${API}/orbit/interpret`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ description: orbitJourney }),
+      })
+      const data = await res.json()
+      if (data.error) {
+        setError(data.error)
+      } else if (data.descriptions) {
+        setOrbitDescriptions(data.descriptions)
+        setOrbitAllowSameArtist(data.allow_same_artist ?? false)
+      }
+    } catch {
+      setError('Interpret failed — is ANTHROPIC_API_KEY set?')
+    }
+    setOrbitPending(false)
+  }, [orbitJourney])
+
+  const applyOrbit = useCallback(async () => {
+    setError('')
+    try {
+      const res = await fetch(`${API}/orbit/apply`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ descriptions: orbitDescriptions, allow_same_artist: orbitAllowSameArtist }),
+      })
+      const data = await res.json()
+      if (data.error) {
+        setError(data.error)
+      } else {
+        setOrbitApplied(true)
+      }
+    } catch {
+      setError('Apply orbit failed — is the DJ running?')
+    }
+  }, [orbitDescriptions])
+
+  const clearOrbit = useCallback(async () => {
+    await fetch(`${API}/orbit`, { method: 'DELETE' })
+    setOrbitApplied(false)
+    setOrbitDescriptions([])
+  }, [])
+
   const playNow = useCallback(async (trackId: string) => {
     await fetch(`${API}/play/${trackId}`, { method: 'POST' })
     setSearchQuery('')
@@ -239,7 +349,7 @@ function App() {
       color: '#e0e0e0', padding: '24px',
     }}>
       <h1 style={{ fontSize: 32, fontWeight: 700, marginBottom: 24, color: '#fff' }}>
-        ALBart DJ
+        ALBart Control Center
       </h1>
 
       <div style={{ display: 'flex', gap: 24 }}>
@@ -368,27 +478,37 @@ function App() {
           </Card>
 
           {/* History */}
-          {status?.history && status.history.length > 1 && (
+          {status?.history && (status.history.length > 1 || status.history[0]?.set_start) && (
             <Card>
               <Label>Session History</Label>
               <div style={{ maxHeight: 400, overflowY: 'auto' }}>
+                {status.history[0]?.set_start && (
+                  <div style={{
+                    padding: '6px 0', fontSize: 12, color: '#4a6cf7',
+                    fontWeight: 600, letterSpacing: 1,
+                    borderBottom: status.history.length > 1 ? '1px solid #2a3050' : 'none',
+                    marginBottom: status.history.length > 1 ? 6 : 0,
+                  }}>
+                    ── NEW SET ──
+                  </div>
+                )}
                 {status.history.slice(1).map((t, i) => (
                   <div key={`${t.track_id}-${i}`}>
-                    {t.set_start && (
-                      <div style={{
-                        padding: '6px 0', fontSize: 12, color: '#4a6cf7',
-                        fontWeight: 600, letterSpacing: 1,
-                        borderTop: i > 0 ? '1px solid #2a3050' : 'none',
-                        marginTop: i > 0 ? 6 : 0,
-                      }}>
-                        ── NEW SET ──
-                      </div>
-                    )}
                     <div style={{
                       padding: '3px 0', fontSize: 14, color: '#999',
                     }}>
                       {t.title} — {t.artist}
                     </div>
+                    {t.set_start && (
+                      <div style={{
+                        padding: '6px 0', fontSize: 12, color: '#4a6cf7',
+                        fontWeight: 600, letterSpacing: 1,
+                        borderBottom: '1px solid #2a3050',
+                        marginBottom: 6,
+                      }}>
+                        ── NEW SET ──
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
@@ -396,8 +516,131 @@ function App() {
           )}
         </div>
 
-        {/* ── Right column: Mood ── */}
+        {/* ── Right column: System + Mood ── */}
         <div style={{ flex: '0 0 340px' }}>
+          {/* System */}
+          <Card>
+            <Label>System</Label>
+            <div style={{ display: 'flex', gap: 10 }}>
+              <button
+                onClick={toggleMapView}
+                style={{
+                  ...btnStyle(system?.mapview.running ? '#e74c3c' : '#2ecc71'),
+                  flex: 1, fontSize: 14, padding: '8px 12px',
+                }}
+              >
+                {system?.mapview.running ? 'Stop MapView' : 'Start MapView'}
+              </button>
+              <button
+                onClick={toggleListener}
+                style={{
+                  ...btnStyle(system?.listener.running ? '#e74c3c' : '#2ecc71'),
+                  flex: 1, fontSize: 14, padding: '8px 12px',
+                }}
+              >
+                {system?.listener.running ? 'Stop Listener' : 'Start Listener'}
+              </button>
+            </div>
+            <div style={{ display: 'flex', gap: 10, marginTop: 8, fontSize: 12, color: '#666' }}>
+              <span style={{ flex: 1, textAlign: 'center' }}>
+                {system?.mapview.running
+                  ? <span style={{ color: '#2ecc71' }}>running (pid {system.mapview.pid})</span>
+                  : 'stopped'}
+              </span>
+              <span style={{ flex: 1, textAlign: 'center' }}>
+                {system?.listener.running
+                  ? <span style={{ color: '#2ecc71' }}>running (pid {system.listener.pid})</span>
+                  : 'stopped'}
+              </span>
+            </div>
+          </Card>
+
+          {/* Orbit */}
+          <Card>
+            <Label>Orbit</Label>
+            <textarea
+              rows={2}
+              placeholder="Describe a 3-hour musical journey..."
+              value={orbitJourney}
+              onChange={e => { setOrbitJourney(e.target.value); setOrbitApplied(false) }}
+              style={{ ...inputStyle, width: '100%', resize: 'vertical' }}
+            />
+            <button
+              onClick={interpretOrbit} disabled={orbitPending}
+              style={{
+                ...btnStyle(orbitPending ? '#555' : '#4a6cf7'),
+                marginTop: 10, width: '100%',
+              }}
+            >
+              {orbitPending ? 'Interpreting...' : 'Interpret'}
+            </button>
+
+            {/* Anchor descriptions (editable) */}
+            <div style={{
+              marginTop: 14, padding: 14,
+              background: '#0f1729', borderRadius: 8,
+              border: '1px solid #2a2f45',
+              minHeight: 60,
+            }}>
+              {orbitDescriptions.length > 0 ? (
+                <>
+                  <div style={{ fontSize: 13, color: '#667', marginBottom: 6 }}>
+                    Anchors (editable, one per line):
+                  </div>
+                  <textarea
+                    rows={6}
+                    value={orbitDescriptions.join('\n')}
+                    onChange={e => {
+                      setOrbitDescriptions(e.target.value.split('\n'))
+                      setOrbitApplied(false)
+                    }}
+                    style={{
+                      ...inputStyle, width: '100%', fontSize: 13,
+                      lineHeight: 1.6, resize: 'vertical',
+                    }}
+                  />
+                </>
+              ) : (
+                <div style={{ fontSize: 14, color: '#444', fontStyle: 'italic' }}>
+                  Describe a journey and click Interpret to generate waypoints
+                </div>
+              )}
+            </div>
+
+            <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+              <button
+                onClick={applyOrbit}
+                disabled={orbitDescriptions.length === 0 || orbitApplied}
+                style={{
+                  ...btnStyle(
+                    orbitDescriptions.length === 0 ? '#333'
+                      : orbitApplied ? '#555'
+                      : '#2ecc71'
+                  ),
+                  flex: 1,
+                }}
+              >
+                {orbitApplied ? 'Active' : 'Apply Orbit'}
+              </button>
+              {status?.orbit_active && (
+                <button onClick={clearOrbit} style={btnStyle('#e74c3c')}>
+                  Clear
+                </button>
+              )}
+            </div>
+
+            {/* Orbit viewer button */}
+            {status?.orbit_active && status.orbit_anchors.length > 0 && (
+              <button
+                onClick={() => setOrbitViewerOpen(true)}
+                style={{ ...btnStyle('#4a6cf7'), marginTop: 12, width: '100%' }}
+              >
+                View Orbit
+              </button>
+            )}
+          </Card>
+
+          {/* Mood */}
           <Card>
             <Label>Mood</Label>
             <textarea
@@ -509,6 +752,14 @@ function App() {
           {error}
         </div>
       )}
+
+      {orbitViewerOpen && status?.orbit_active && (
+        <OrbitViewer
+          anchors={status.orbit_anchors}
+          progress={status.orbit_progress}
+          onClose={() => setOrbitViewerOpen(false)}
+        />
+      )}
     </div>
   )
 }
@@ -591,6 +842,163 @@ function formatTime(ms: number): string {
   const sec = s % 60
   return `${m}:${sec.toString().padStart(2, '0')}`
 }
+
+// ── Orbit Viewer ────────────────────────────────────────────────────────
+
+function OrbitViewer({ anchors, progress, onClose }: {
+  anchors: OrbitAnchorInfo[]
+  progress: OrbitProgress | null
+  onClose: () => void
+}) {
+  const size = 420
+  const cx = size / 2
+  const cy = size / 2
+  const radius = 150
+  const coverSize = 56
+
+  const [pos, setPos] = useState({ x: window.innerWidth - size - 60, y: 30 })
+  const [dragging, setDragging] = useState(false)
+  const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 })
+
+  const onMouseDown = useCallback((e: React.MouseEvent) => {
+    setDragging(true)
+    setDragOffset({ x: e.clientX - pos.x, y: e.clientY - pos.y })
+  }, [pos])
+
+  useEffect(() => {
+    if (!dragging) return
+    const onMove = (e: MouseEvent) => {
+      setPos({ x: e.clientX - dragOffset.x, y: e.clientY - dragOffset.y })
+    }
+    const onUp = () => setDragging(false)
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+    return () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+  }, [dragging, dragOffset])
+
+  // Arrange anchors in a circle
+  const positions = anchors.map((_, i) => {
+    const angle = (i / anchors.length) * Math.PI * 2 - Math.PI / 2
+    return { x: cx + Math.cos(angle) * radius, y: cy + Math.sin(angle) * radius }
+  })
+
+  const prevIdx = progress?.prev_index ?? 0
+  const curIdx = progress?.current_index ?? 0
+  const segProgress = progress?.segment_progress ?? 0
+  const phase = progress?.phase ?? 'dwell'
+
+  const phaseLabel = phase === 'dwell'
+    ? `Dwelling (${Math.floor((progress?.dwell_elapsed ?? 0) / 60)}/${Math.floor((progress?.dwell_duration ?? 1800) / 60)}m)`
+    : `Transit ${(progress?.transit_total ?? 10) - (progress?.transit_remaining ?? 0)}/${progress?.transit_total ?? 10}`
+
+  return (
+    <div style={{
+      position: 'fixed', left: pos.x, top: pos.y, zIndex: 1000,
+      background: '#16213e', borderRadius: 12,
+      boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
+      border: '1px solid #2a3050',
+      userSelect: 'none',
+    }}>
+      {/* Title bar — draggable */}
+      <div
+        onMouseDown={onMouseDown}
+        style={{
+          padding: '8px 14px', cursor: 'grab',
+          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+          borderBottom: '1px solid #2a3050',
+        }}
+      >
+        <span style={{ fontSize: 13, color: '#888', fontWeight: 600 }}>
+          Orbit — <span style={{ color: phase === 'transit' ? '#f0c040' : '#2ecc71' }}>{phaseLabel}</span>
+        </span>
+        <button
+          onClick={onClose}
+          style={{
+            background: 'none', border: 'none', color: '#666',
+            fontSize: 18, cursor: 'pointer', padding: '0 4px',
+          }}
+        >
+          x
+        </button>
+      </div>
+
+      <div style={{ padding: 16, position: 'relative' }}>
+        <svg width={size} height={size}>
+          {anchors.map((_, i) => {
+            const j = (i + 1) % anchors.length
+            const from = positions[i]
+            const to = positions[j]
+
+            const isActiveSegment = (i === prevIdx && j === curIdx)
+
+            if (isActiveSegment) {
+              const mx = from.x + (to.x - from.x) * segProgress
+              const my = from.y + (to.y - from.y) * segProgress
+              return (
+                <g key={`seg-${i}`}>
+                  <line
+                    x1={from.x} y1={from.y} x2={mx} y2={my}
+                    stroke="#f0c040" strokeWidth={4} strokeLinecap="round"
+                  />
+                  <line
+                    x1={mx} y1={my} x2={to.x} y2={to.y}
+                    stroke="#334" strokeWidth={1.5}
+                  />
+                </g>
+              )
+            }
+
+            return (
+              <line
+                key={`seg-${i}`}
+                x1={from.x} y1={from.y} x2={to.x} y2={to.y}
+                stroke="#334" strokeWidth={1.5}
+              />
+            )
+          })}
+        </svg>
+
+        {anchors.map((a, i) => {
+          const p = positions[i]
+          const isTarget = (i === curIdx)
+          const highlightColor = phase === 'dwell' ? '#2ecc71' : '#f0c040'
+          return (
+            <div key={`cover-${i}`} style={{
+              position: 'absolute',
+              left: 16 + p.x - coverSize / 2,
+              top: 16 + p.y - coverSize / 2,
+              width: coverSize, height: coverSize,
+              borderRadius: 6,
+              border: isTarget ? `3px solid ${highlightColor}` : '2px solid #334',
+              overflow: 'hidden',
+              boxShadow: isTarget ? `0 0 12px ${highlightColor}66` : 'none',
+              transition: 'border-color 0.3s, box-shadow 0.3s',
+            }}>
+              <img
+                src={`http://127.0.0.1:8765${a.art_url}`}
+                alt={a.title}
+                style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                draggable={false}
+              />
+              <div style={{
+                position: 'absolute', bottom: 0, left: 0, right: 0,
+                background: 'rgba(0,0,0,0.75)', padding: '2px 4px',
+                fontSize: 8, color: '#ccc', textAlign: 'center',
+                whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+              }}>
+                {a.artist}
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 
 // ── Styles ───────────────────────────────────────────────────────────────
 
