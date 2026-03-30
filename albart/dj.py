@@ -857,11 +857,18 @@ class DJ:
                         self._monitored_track = None
                     continue
 
-                # Nothing playing or too early to pick
-                if remaining == 0 or remaining > 8000:
+                # In orbit mode, eagerly pick the next track as soon as the
+                # current one is confirmed playing (remaining > 0), so
+                # Spotify's auto-play can't sneak in between DJ picks
+                if self._orbit is not None and self._next_pick is None:
+                    if remaining == 0:
+                        continue  # wait for track to start playing
+                    # fall through to pick next immediately
+                elif remaining == 0 or remaining > 8000:
+                    # Nothing playing or too early to pick
                     continue
 
-                # Track ending — pick next
+                # Pick next track
                 now = time.monotonic()
                 time_since_hop = now - self._last_hop_time
 
@@ -895,12 +902,17 @@ class DJ:
                     hop_type = "normal"
 
                 if next_tid:
-                    self._pending_hop_type = hop_type
+                    # Preserve pending_hop_type if orbit already set it (e.g. transit start)
+                    if self._pending_hop_type != "LONG":
+                        self._pending_hop_type = hop_type
                     self._next_pick = next_tid
                     self._monitored_track = current
                 else:
-                    logger.warning("Could not find next track — resetting played set")
-                    self._played.clear()
+                    if self._orbit is None:
+                        logger.warning("Could not find next track — resetting played set")
+                        self._played.clear()
+                    else:
+                        logger.warning("Orbit could not find next track — skipping")
 
         except KeyboardInterrupt:
             logger.info("DJ mode stopped. Played %d tracks.", len(self._played))
