@@ -406,13 +406,15 @@ class DJ:
         # ── Check phase transitions ──────────────────────────────────
         if self._orbit.phase == "dwell":
             if force_transit or self._orbit.should_leave_dwell():
-                self._orbit.start_transit()
+                self._orbit.start_transit(current_emb)
+                self._pending_hop_type = "LONG"  # mark set change in history
 
-        # ── DWELL: normal neighbor hopping ───────────────────────────
+        # ── DWELL: pick from the anchor's 5D neighborhood ─────────────
         if self._orbit.phase == "dwell":
-            if current_emb is None:
-                return None
-            result = self._pick_normal_hop(current_emb)
+            # Use 5D UMAP space for dwell — captures genre structure better
+            # than 512D which groups by audio texture across genres
+            anchor_5d = self._orbit.target.position_5d
+            result = self._pick_5d_neighbor(anchor_5d)
             if result:
                 self._orbit_picked = True
                 logger.info(
@@ -447,16 +449,89 @@ class DJ:
                 TRANSIT_STEPS,
             )
 
-        # Check if transit is done → start dwell at new anchor
-        if self._orbit.transit_done():
+        # Check if transit is done — either all steps used or arrived early
+        arrived = False
+        if result:
+            result_emb = self._get_embedding(result)
+            if result_emb is not None and self._orbit.check_transit_arrived(result_emb):
+                self._orbit.start_dwell()
+                arrived = True
+        if not arrived and self._orbit.transit_done():
             self._orbit.start_dwell()
+            arrived = True
+        if arrived:
+            self._pending_hop_type = "LONG"  # mark set change in history
 
         return result
 
+    def _pick_5d_neighbor(self, anchor_5d: np.ndarray) -> str | None:
+        """Pick from the K nearest unplayed tracks in 5D UMAP space.
+
+        Used during orbit dwell to stay within the genre cluster.
+        Applies artist penalty and mood mask.
+        """
+        dists = np.linalg.norm(self._umap_5d - anchor_5d, axis=1)
+
+        # Apply artist penalty unless orbit allows same-artist
+        if not (self._orbit is not None and self._orbit.allow_same_artist):
+            recent_artists = self._recent_artists(3)
+            penalty = 0.01 if self._orbit is not None else 0.1
+            for idx in range(len(dists)):
+                tid = self._id_list[idx]
+                r = self._db.get(tid)
+                if r and r["artist"] and r["artist"].lower() in recent_artists:
+                    dists[idx] *= 1.0 / penalty  # inflate distance to penalize
+
+        order = np.argsort(dists)
+        candidates = []
+        for idx in order:
+            tid = self._id_list[idx]
+            if tid in self._played:
+                continue
+            if self._mood_mask is not None and not self._mood_mask[idx]:
+                continue
+            candidates.append((tid, float(dists[idx])))
+            if len(candidates) >= self._song_k:
+                break
+
+        if not candidates:
+            return None
+        if len(candidates) == 1 or self._song_k <= 1:
+            return candidates[0][0]
+
+        tids = [c[0] for c in candidates]
+        d = np.array([c[1] for c in candidates])
+        weights = 1.0 / np.maximum(d, 1e-8)
+        weights /= weights.sum()
+        chosen = self._rng.choice(len(tids), p=weights)
+        return tids[chosen]
+
     def _find_nearest_512(self, target_emb: np.ndarray) -> str | None:
-        """Find nearest unplayed, in-mood track to a 512D target point."""
-        candidates = self._find_nearest_unplayed(target_emb, k=1)
-        return candidates[0][0] if candidates else None
+        """Find nearest unplayed, in-mood track to a 512D target point.
+
+        Uses a small candidate pool with artist penalty to avoid
+        same-artist runs during transit.
+        """
+        candidates = self._find_nearest_unplayed(target_emb, k=self._song_k)
+        if not candidates:
+            return None
+
+        # Apply artist penalty (same logic as _pick_normal_hop)
+        if not (self._orbit is not None and self._orbit.allow_same_artist):
+            recent_artists = self._recent_artists(3)
+            tids = [c[0] for c in candidates]
+            dists = np.array([c[1] for c in candidates])
+            penalty = 0.01 if self._orbit is not None else 0.1
+            weights = 1.0 / np.maximum(dists, 1e-8)
+            for i, tid in enumerate(tids):
+                r = self._db.get(tid)
+                if r and r["artist"] and r["artist"].lower() in recent_artists:
+                    weights[i] *= penalty
+            weights /= weights.sum()
+            chosen = self._rng.choice(len(tids), p=weights)
+            return tids[chosen]
+
+        return candidates[0][0]
 
     def _pick_normal_hop(self, current_emb: np.ndarray) -> str | None:
         """Pick from nearest unplayed tracks.
@@ -483,10 +558,13 @@ class DJ:
 
         # Penalize same artist as recent tracks (unless orbit allows it)
         if not (self._orbit is not None and self._orbit.allow_same_artist):
+            # Stronger penalty during orbit dwell (anchor neighborhood is
+            # dominated by the anchor artist, so 0.1× isn't enough)
+            penalty = 0.01 if self._orbit is not None else 0.1
             for i, tid in enumerate(tids):
                 r = self._db.get(tid)
                 if r and r["artist"] and r["artist"].lower() in recent_artists:
-                    weights[i] *= 0.1
+                    weights[i] *= penalty
 
         weights /= weights.sum()
 
@@ -590,6 +668,11 @@ class DJ:
             "▶  %s  [played: %d / %d]%s",
             self._track_name(tid), len(self._played), self._N, hop_label,
         )
+        # Update orbit position for progress tracking
+        if self._orbit is not None and self._orbit_picked:
+            emb = self._get_embedding(tid)
+            if emb is not None:
+                self._orbit.update_position(emb)
         self._orbit_picked = False
         # Broadcast embedding to map display (works without main engine)
         self._broadcast_to_map(tid)

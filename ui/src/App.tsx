@@ -23,6 +23,7 @@ interface OrbitProgress {
   current_index: number
   prev_index: number
   segment_progress: number
+  completed_segments: number[]  // from-anchor indices of completed segments
   dwell_elapsed: number
   dwell_duration: number
   transit_remaining: number
@@ -889,6 +890,7 @@ function OrbitViewer({ anchors, progress, onClose }: {
   const curIdx = progress?.current_index ?? 0
   const segProgress = progress?.segment_progress ?? 0
   const phase = progress?.phase ?? 'dwell'
+  const completedSegments = new Set(progress?.completed_segments ?? [])
 
   const phaseLabel = phase === 'dwell'
     ? `Dwelling (${Math.floor((progress?.dwell_elapsed ?? 0) / 60)}/${Math.floor((progress?.dwell_duration ?? 1800) / 60)}m)`
@@ -933,8 +935,10 @@ function OrbitViewer({ anchors, progress, onClose }: {
             const to = positions[j]
 
             const isActiveSegment = (i === prevIdx && j === curIdx)
+            const isCompleted = completedSegments.has(i)
 
-            if (isActiveSegment) {
+            if (isActiveSegment && segProgress > 0 && segProgress < 1) {
+              // Partially traversed — show progress bar
               const mx = from.x + (to.x - from.x) * segProgress
               const my = from.y + (to.y - from.y) * segProgress
               return (
@@ -955,7 +959,9 @@ function OrbitViewer({ anchors, progress, onClose }: {
               <line
                 key={`seg-${i}`}
                 x1={from.x} y1={from.y} x2={to.x} y2={to.y}
-                stroke="#334" strokeWidth={1.5}
+                stroke={isCompleted || (isActiveSegment && segProgress >= 1) ? '#f0c040' : '#334'}
+                strokeWidth={isCompleted || (isActiveSegment && segProgress >= 1) ? 4 : 1.5}
+                strokeLinecap="round"
               />
             )
           })}
@@ -963,8 +969,7 @@ function OrbitViewer({ anchors, progress, onClose }: {
 
         {anchors.map((a, i) => {
           const p = positions[i]
-          const isTarget = (i === curIdx)
-          const highlightColor = phase === 'dwell' ? '#2ecc71' : '#f0c040'
+          const isDwelling = (i === curIdx && phase === 'dwell')
           return (
             <div key={`cover-${i}`} style={{
               position: 'absolute',
@@ -972,9 +977,9 @@ function OrbitViewer({ anchors, progress, onClose }: {
               top: 16 + p.y - coverSize / 2,
               width: coverSize, height: coverSize,
               borderRadius: 6,
-              border: isTarget ? `3px solid ${highlightColor}` : '2px solid #334',
+              border: isDwelling ? '3px solid #2ecc71' : '2px solid #334',
               overflow: 'hidden',
-              boxShadow: isTarget ? `0 0 12px ${highlightColor}66` : 'none',
+              boxShadow: isDwelling ? '0 0 12px #2ecc7166' : 'none',
               transition: 'border-color 0.3s, box-shadow 0.3s',
             }}>
               <img

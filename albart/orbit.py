@@ -57,6 +57,9 @@ class Orbit:
         self._dwell_start: float = time.monotonic()
         self._transit_remaining: int = 0
         self._arrived: bool = False  # True after completing a transit to this anchor
+        self._transit_initial_dist: float = 1.0
+        self._completed_segments: set[int] = set()  # indices of completed segments (from→to)
+        self._last_emb_512: np.ndarray | None = None  # last played track embedding
 
         logger.info("Orbit created: %d anchors", len(anchors))
         for i, a in enumerate(anchors):
@@ -79,18 +82,30 @@ class Orbit:
         self.phase = "dwell"
         self._dwell_start = time.monotonic()
         self._arrived = True
+        # Mark the segment we just traversed as completed
+        prev_idx = (self.current_index - 1) % len(self.anchors)
+        self._completed_segments.add(prev_idx)
         logger.info("Orbit DWELL at [%d]: %s",
                      self.current_index, self.target.description)
 
-    def start_transit(self) -> None:
+    def start_transit(self, current_emb: np.ndarray | None = None) -> None:
         """Enter transit phase toward the next anchor."""
         self.phase = "transit"
         self._transit_remaining = TRANSIT_STEPS
         self._arrived = False
         self.current_index = (self.current_index + 1) % len(self.anchors)
+        # Record initial distance for early-arrival detection
+        if current_emb is not None:
+            self._transit_initial_dist = float(np.linalg.norm(
+                self.target.embedding_512.astype(np.float64) -
+                current_emb.astype(np.float64)
+            ))
+        else:
+            self._transit_initial_dist = 1.0
         logger.info(
-            "Orbit TRANSIT → [%d]: %s  (%d steps)",
-            self.current_index, self.target.description, TRANSIT_STEPS,
+            "Orbit TRANSIT → [%d]: %s  (%d steps, dist=%.4f)",
+            self.current_index, self.target.description,
+            TRANSIT_STEPS, self._transit_initial_dist,
         )
 
     def dwell_elapsed(self) -> float:
@@ -129,6 +144,31 @@ class Orbit:
 
         return target_point.astype(np.float32)
 
+    def check_transit_arrived(self, track_emb: np.ndarray) -> bool:
+        """True if the track is close enough to the target to stop transit.
+
+        Arrives when within 15% of the initial transit distance.
+        """
+        if self.phase != "transit":
+            return False
+        dist = float(np.linalg.norm(
+            self.target.embedding_512.astype(np.float64) -
+            track_emb.astype(np.float64)
+        ))
+        threshold = self._transit_initial_dist * 0.15
+        if dist <= threshold:
+            logger.info(
+                "Orbit transit: arrived early (dist=%.4f <= %.4f, step %d/%d)",
+                dist, threshold,
+                TRANSIT_STEPS - self._transit_remaining, TRANSIT_STEPS,
+            )
+            return True
+        return False
+
+    def update_position(self, emb_512: np.ndarray) -> None:
+        """Update the current position (called after each orbit track plays)."""
+        self._last_emb_512 = emb_512.copy()
+
     def transit_done(self) -> bool:
         """True if all transit steps are used up."""
         return self._transit_remaining <= 0
@@ -141,16 +181,25 @@ class Orbit:
             # Show the incoming segment as complete only if we actually
             # arrived here via transit (not on initial startup)
             progress = 1.0 if self._arrived else 0.0
+        elif self._last_emb_512 is not None and self._transit_initial_dist > 1e-8:
+            # During transit: progress = how far we've come in 512D
+            # (ratio of distance covered to total distance)
+            dist_remaining = float(np.linalg.norm(
+                self.target.embedding_512.astype(np.float64) -
+                self._last_emb_512.astype(np.float64)
+            ))
+            progress = max(0.0, min(1.0,
+                1.0 - dist_remaining / self._transit_initial_dist
+            ))
         else:
-            # During transit, progress = steps completed / total
-            steps_done = TRANSIT_STEPS - self._transit_remaining
-            progress = steps_done / TRANSIT_STEPS
+            progress = 0.0
 
         return {
             "phase": self.phase,
             "current_index": self.current_index,
             "prev_index": prev_idx,
             "segment_progress": progress,
+            "completed_segments": list(self._completed_segments),
             "dwell_elapsed": self.dwell_elapsed() if self.phase == "dwell" else 0,
             "dwell_duration": DWELL_DURATION,
             "transit_remaining": self._transit_remaining if self.phase == "transit" else 0,

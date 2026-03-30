@@ -112,6 +112,7 @@ class OrbitProgress(BaseModel):
     current_index: int
     prev_index: int
     segment_progress: float
+    completed_segments: list[int] = []  # indices of from-anchor for completed segments
     dwell_elapsed: float = 0
     dwell_duration: float = 0
     transit_remaining: int = 0
@@ -392,6 +393,8 @@ def new_set() -> dict:
         next_tid = _dj._pick_long_hop()
     if next_tid:
         _dj._pending_hop_type = "LONG"
+        _dj._next_pick = None       # clear any queued pick
+        _dj._monitored_track = None
         _dj._play_track(next_tid)
         import time
         _dj._last_hop_time = time.monotonic()
@@ -406,11 +409,13 @@ def skip_track() -> dict:
     if not _dj._history:
         return {"error": "No track history"}
     if _dj._orbit is not None:
-        next_tid = _dj._pick_orbit_hop(_dj._history[-1], 1.0)
+        next_tid = _dj._pick_orbit_hop(_dj._history[-1])
     else:
         current_emb = _dj._get_embedding(_dj._history[-1])
         next_tid = _dj._pick_normal_hop(current_emb) if current_emb is not None else None
     if next_tid:
+        _dj._next_pick = None       # clear any queued pick
+        _dj._monitored_track = None
         _dj._play_track(next_tid)
         return {"status": "skipped", "now_playing": _dj._track_name(next_tid)}
     return {"error": "Could not find next track"}
@@ -690,7 +695,8 @@ def apply_orbit(req: OrbitDescriptorsUpdate) -> dict:
         # Start dwelling at anchor 0 (not yet arrived via transit)
         orbit.current_index = 0
         orbit.start_dwell()
-        orbit._arrived = False  # no transit completed yet
+        orbit._arrived = False              # no transit completed yet
+        orbit._completed_segments.clear()   # no segments traversed yet
 
         _dj._orbit = orbit
         logger.info("Orbit activated: %d anchors, dwelling at [0]: %s",
