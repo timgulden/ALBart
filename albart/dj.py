@@ -127,6 +127,7 @@ class DJ:
         self._last_hop_time: float = time.monotonic()
         self._next_pick: str | None = None       # picked but not yet played
         self._monitored_track: str | None = None  # Spotify track ID we're watching
+        self._monitor_start: float = 0.0          # when we started monitoring
         self._pending_hop_type: str | None = None
         self._set_starts: set[str] = set()  # track IDs that began a new set
         self._stop_requested: bool = False
@@ -659,6 +660,11 @@ class DJ:
                     return False
         self._played.add(tid)
         self._history.append(tid)
+        # Reset cached progress so _get_remaining_ms doesn't return stale
+        # low values that would trigger the next pick prematurely
+        self._cached_progress_ms = 0
+        self._cached_duration_ms = 300_000  # assume ~5 min until next poll updates
+        self._cached_progress_time = time.monotonic()
         hop_label = ""
         if hasattr(self, "_pending_hop_type") and self._pending_hop_type == "LONG":
             hop_label = " ═══ LONG HOP"
@@ -806,15 +812,18 @@ class DJ:
                 # Check playback state — resume if Spotify paused unexpectedly
                 current = self._get_current_spotify_track()
                 if current is None and self._history:
-                    # Spotify is paused or stopped — try to resume
-                    if not self._cached_is_playing:
+                    # Spotify is paused or stopped — try to resume, but only
+                    # if it's been a while since we last played a track
+                    # (brief gaps during track transitions are normal)
+                    since_last_play = time.monotonic() - self._cached_progress_time
+                    if not self._cached_is_playing and since_last_play > 15:
                         try:
                             self._sp.start_playback()
                             logger.info("Resumed paused playback")
                             time.sleep(1)  # give Spotify a moment
                         except Exception as e:
                             logger.warning("Could not resume playback: %s", e)
-                        continue
+                    continue
 
                 # Check if Spotify track changed (manual override or album advance).
                 # If we have a pending pick, ignore the change — we'll override
@@ -846,12 +855,25 @@ class DJ:
                 # If we already picked the next track, play it when song ends
                 if self._next_pick is not None:
                     # Detect: monitored track changed (Spotify advanced) OR
-                    # remaining is low — either way, take control now
+                    # remaining is low OR track restarted (progress jumped back)
                     track_changed = (
                         self._monitored_track is not None
                         and current != self._monitored_track
                     )
-                    if track_changed or remaining <= 2000:
+                    # Detect track restart: we're monitoring a track and
+                    # waiting for it to end, but progress is near 0 — it
+                    # restarted instead of advancing.  Only check if we've
+                    # been monitoring for at least 10s (avoids false positive
+                    # right after we started the track ourselves).
+                    elapsed_monitoring = time.monotonic() - self._monitor_start
+                    track_restarted = (
+                        current == self._monitored_track
+                        and elapsed_monitoring > 10
+                        and self._cached_progress_ms < 3000
+                    )
+                    if track_changed or track_restarted or remaining <= 2000:
+                        if track_restarted:
+                            logger.info("Track restarted — overriding with next pick")
                         self._play_track(self._next_pick)
                         self._next_pick = None
                         self._monitored_track = None
@@ -907,6 +929,7 @@ class DJ:
                         self._pending_hop_type = hop_type
                     self._next_pick = next_tid
                     self._monitored_track = current
+                    self._monitor_start = time.monotonic()
                 else:
                     if self._orbit is None:
                         logger.warning("Could not find next track — resetting played set")
