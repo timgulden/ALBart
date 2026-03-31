@@ -55,6 +55,22 @@ Never hardcode device strings elsewhere. Never make this a config option.
 - `softmax_k`, `dwell_k`, `brightness_k` are independent — tune separately.
 - `embedding_interval_seconds: 0` means continuous (recompute immediately after finishing).
 
+### Embedding Space Usage (locked in)
+Two embedding spaces serve different purposes:
+- **512D CLAP** (raw audio embeddings): captures audio texture — timbre, energy, production. Used for **transit** between genre clusters and for normal DJ hops. Searched via FAISS index.
+- **5D UMAP** (pre-computed projection of 512D): captures genre structure — which tracks cluster together. Used for **dwell** at orbit anchors (staying within a genre). Searched via brute-force numpy distance.
+
+Do NOT mix these: dwell should use 5D, transit should use 512D. This split was empirically validated — 512D dwell drifts across genres (CLAP groups by audio texture, not genre), while 5D dwell stays coherent.
+
+### Orbit Navigation (locked in)
+The orbit is a two-phase state machine cycling through anchor tracks:
+- **Dwell phase** (~30 min): pick from K nearest unplayed tracks to the anchor in 5D UMAP space. Artist penalty 0.01× unless `allow_same_artist` is True.
+- **Transit phase** (~10 steps): fractional stepping through 512D space. Step 1/N of remaining distance each hop (N counts down from 10). Stop early when within 15% of initial distance. Artist penalty 0.01× applied via candidate pool.
+
+Anchor tracks are chosen by Claude from the full library (user describes a journey, Claude picks iconic tracks). Fuzzy matching handles separator variants (—, --, -, :) and partial/reversed artist-title matches.
+
+`allow_same_artist` is determined by a separate Claude call ("would same-artist runs make sense for this session?"). Defaults to False on failure.
+
 ### Config
 All tunable values are in `config.yaml` and accessed through a loaded config dict passed at startup. No module-level constants for values the spec calls "configurable" or "default". Use `pyyaml` to load.
 
@@ -83,7 +99,8 @@ ALBart/
     listener.py           # Entry: python -m albart.listener
     mapview.py            # Entry: python -m albart.mapview
     dj.py                 # Entry: python -m albart.dj
-    dj_server.py          # Entry: python -m albart.dj_server (web API)
+    dj_server.py          # Entry: python -m albart.dj_server (control center API)
+    orbit.py              # Orbit navigation: anchors, dwell/transit state machine
     text_embedder.py      # Lazy-loading CLAP text embedding (mood filtering)
     utils.py              # Shared helpers: get_device(), load_config()
     __init__.py
@@ -120,6 +137,7 @@ ALBart/
     build_voronoi.py      # Voronoi cluster labels (uses Claude API)
     build_text_labels.py  # CLAP text embeddings vocabulary
     dj_simulate.py        # Offline DJ trajectory simulation
+    test_transit.py       # Offline transit strategy testing
     review_art.py         # 32×32 art inspection
     reembed_existing.py   # Re-embed tracks (schema migration)
     archive/              # Diagnostic scripts from development

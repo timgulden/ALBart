@@ -39,12 +39,12 @@ python -m albart.dj --hop-interval 20         # long hop every 20 min
 python -m albart.dj --mood "chill jazz, no metal"  # mood-filtered
 ```
 
-**Web UI mode:**
+**Web UI (Control Center):**
 ```bash
 python -m albart.dj_server                    # API server on :8765
 cd ui && npm run dev                          # React UI on :5173
 ```
-The web UI provides live controls: mood text → Claude interpretation → apply, song/set temperature sliders, volume, track search with Next/Now, skip/stop.
+The web UI is a full control center: DJ controls, mood filtering, orbit navigation, and system management (start/stop MapView and Listener as subprocesses). Prevents macOS idle sleep automatically via `caffeinate`.
 
 **Modes:**
 - `exact` — hops based on the stored preview embedding of each track. Controlled, repeatable.
@@ -53,10 +53,20 @@ The web UI provides live controls: mood text → Claude interpretation → apply
 **Mood filtering:**
 Describe the vibe in plain text (e.g., "hipster party, indie electronic, no opera"). Claude expands this into ~20 genre descriptors, which are embedded via CLAP into the same 512D space as the audio. Tracks are pre-tagged as in-mood or out-of-mood based on cosine similarity. The DJ only hops to in-mood tracks. Mood strictness is adjustable live via the web UI.
 
+**Orbit mode:**
+Describe a musical journey (e.g., "Pacific Northwest grunge to K-pop and back"). Claude picks 5-6 anchor tracks from your library and determines whether same-artist runs are appropriate. The DJ then cycles through the anchors in two alternating phases:
+
+- **Dwell** (~30 min per anchor): plays tracks from the anchor's neighborhood using **5D UMAP** distances, which capture genre structure. This keeps the music within the genre cluster — K-pop anchors play K-pop, grunge anchors play grunge.
+- **Transit** (~10 tracks between anchors): navigates from one anchor to the next through **512D CLAP** embedding space using fractional stepping (1/10, 1/9, 1/8... of remaining distance). This bridges genres via idiosyncratic audio similarities rather than genre labels, producing smooth and surprising transitions. Transit stops early when within 15% of the target distance.
+
+The orbit viewer is a draggable floating panel showing anchor album covers in a circle with progress bars between them (yellow = traversed, gray = upcoming). The current dwell anchor glows green.
+
 **Overrides:**
 - Change the track in Spotify → DJ detects it and continues from there
 - Click a track in the MapView → DJ plays it and continues from there
 - Search and play via the web UI (Next = queue, Now = interrupt)
+- Skip — advance one track within the current phase
+- New Set — leave dwell, start transit to the next anchor
 
 ## How They Work Together
 
@@ -145,13 +155,28 @@ The 3D cloud uses a hybrid projection:
 - **OpenGL** renders textured quads at float positions with mipmapping and MSAA
 
 ### DJ Navigation
-- **Normal hops**: picks from the K nearest unplayed tracks (K = song temperature, 1-50), weighted by closeness, with artist penalty to avoid same-artist runs
-- **Long hops** (every ~30 min): extrapolates the trajectory of the last two tracks, landing N× further along (N = set temperature, 1-20×)
-- **Mood filtering**: tracks pre-tagged as in/out based on CLAP cosine similarity to mood descriptors. The DJ only considers in-mood tracks for both normal and long hops.
+
+**Two embedding spaces, used for different purposes:**
+- **512D CLAP** (raw audio embeddings): captures what tracks *sound* like — timbre, energy, production style. Used for transit between genres and normal hop selection.
+- **5D UMAP** (pre-computed projection): captures *genre structure* — which tracks belong to the same musical category. Used for dwell (staying within a genre cluster).
+
+**Normal mode:**
+- **Normal hops**: picks from the K nearest unplayed tracks (K = song temperature, 1-50) in 512D, weighted by closeness, with artist penalty to avoid same-artist runs
+- **Long hops** (every ~30 min): extrapolates the trajectory of the last two tracks in 512D, landing N× further along (N = set temperature, 1-20×)
+
+**Orbit mode (two-phase cycle):**
+- **Dwell**: picks from K nearest unplayed tracks to the anchor in **5D UMAP** space (genre clustering keeps music coherent). Artist penalty 0.01× unless Claude flagged same-artist runs as appropriate.
+- **Transit**: fractional stepping through **512D CLAP** space — each step covers 1/N of the remaining distance to the next anchor (N counts down from 10). Finds the nearest unplayed track to each target point. Stops early when within 15% of the initial distance. Artist penalty applied to prevent same-artist runs during genre bridging.
+
+**Shared filters:**
+- **Mood filtering**: tracks pre-tagged as in/out based on CLAP cosine similarity to mood descriptors. Stacks with orbit.
 - **Near-duplicate filter**: skips tracks within L2 < 0.01 of recently played (catches remasters)
 
 ### Mood Pipeline
 Free text → Claude API (expands into ~20 genre descriptors) → CLAP text embedding (same 512D space as audio) → cosine similarity against all tracks → boolean mask. The CLAP model loads on demand and auto-unloads after 5 min idle.
+
+### Orbit Pipeline
+Journey description → Claude API (picks 5-6 anchor tracks from your library + decides same-artist policy) → fuzzy match against library metadata → anchor tracks' actual 512D embeddings and 5D UMAP positions define the orbit. The orbit viewer uses 5D positions for display; navigation uses 512D for transit and 5D for dwell.
 
 ## Project Structure
 
@@ -161,7 +186,8 @@ ALBart/
     listener.py              # Entry: python -m albart.listener
     mapview.py               # Entry: python -m albart.mapview
     dj.py                    # Entry: python -m albart.dj
-    dj_server.py             # Entry: python -m albart.dj_server (web API)
+    dj_server.py             # Entry: python -m albart.dj_server (control center API)
+    orbit.py                 # Orbit navigation: anchors, dwell/transit state machine
     text_embedder.py         # Lazy-loading CLAP text embedding (for mood)
     utils.py                 # Shared: device selection, config loading
     pipeline/
@@ -195,6 +221,7 @@ ALBart/
     build_voronoi.py         # Voronoi cluster labels (uses Claude API)
     build_text_labels.py     # CLAP text embeddings
     dj_simulate.py           # Offline DJ trajectory simulation
+    test_transit.py          # Offline transit strategy testing
     review_art.py            # 32×32 art inspection
     reembed_existing.py      # Re-embed tracks (schema migration)
     archive/                 # Diagnostic scripts from development
