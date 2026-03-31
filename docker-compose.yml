@@ -1,0 +1,20 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: albart-db
+    environment:
+      POSTGRES_DB: albart
+      POSTGRES_USER: albart
+      POSTGRES_PASSWORD: albart
+    ports:
+      - "5433:5432"  # 5433 to avoid conflicting with local PostgreSQL
+    volumes:
+      - albart-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U albart"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  albart-pgdata:

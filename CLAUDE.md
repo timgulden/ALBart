@@ -2,92 +2,95 @@
 
 ## Project Overview
 
-ALBart is an ambient audio visualization system. It listens to environmental sound, computes CLAP audio embeddings, and displays album art from a personal Spotify library that most closely matches the ambient audio. It runs in two phases:
+ALBart started as an ambient audio visualization system — listening to the room and displaying matching album art on a 32x32 LED matrix. It has evolved into a full AI DJ that navigates through high-dimensional audio embedding space, with orbit navigation, mood filtering, and a web control center.
 
-- **Offline pipeline**: pulls top Spotify tracks, downloads previews and album art, computes embeddings, builds a FAISS index.
-- **Runtime loop**: captures mic input, queries the FAISS index, and drives a 32x32 LED display (simulated on macOS, real HUB75 panel on Raspberry Pi 5).
+It runs in several modes:
+
+- **DJ mode** (`python3 -m albart.dj`): automated music navigation through Spotify, controlled via web UI
+- **Listener mode** (`python3 -m albart.listener`): ambient audio recognition driving an LED display
+- **MapView** (`python3 -m albart.mapview`): real-time visualization of position in embedding space
+- **Control Center** (`python3 -m albart.dj_server`): web API + React UI for DJ control
+- **Offline pipeline** (`python3 -m albart.pipeline.run_pipeline`): builds the track database from Spotify
 
 Full spec: `albart_spec.md`
 
 ---
 
-## Architecture Decisions (locked in)
+## Design Principles
 
-### Threading Model
-The runtime has three concurrent concerns. Use Python `threading` — do NOT use `asyncio`.
+### Functional Architecture (core → effects → engine)
 
-- **Audio thread**: `sounddevice.InputStream` callback writes into a circular `numpy` buffer. Protect buffer reads/writes with a `threading.Lock`.
-- **Embedding thread**: a `threading.Thread` runs CLAP inference every N seconds, posts results to a `queue.Queue` read by the display loop.
-- **Display loop (main thread)**: runs at 30fps on the main thread. pygame requires the main thread. Reads from the embedding result queue at natural cover boundaries.
+The DJ system follows a functional architecture inspired by the MAExpert project:
+
+- **Pure logic** (`albart/core/`): All decision-making is in pure functions. They take immutable state + parameters and return `LogicResult(new_state, commands)`. No I/O, no side effects, no `time.monotonic()` calls — time is a parameter. This layer is fully unit-testable with zero infrastructure.
+
+- **Effects** (`albart/effects/`): All side effects (Spotify API, database queries, UDP broadcast, CLAP inference) are isolated in this layer. Effects never modify DJ state — they execute commands and return results.
+
+- **Engine** (`albart/engine.py`): The single-threaded state owner. Runs the poll loop: gather inputs → call pure logic → execute commands → publish new state. The ONLY writer of `DJState`.
+
+- **Server** (`albart/server/`): Thin FastAPI adapter. Reads engine state via immutable snapshots (`engine.get_snapshot()`). Mutations go through `engine.update_param()`, `engine.enqueue_action()`, or direct engine methods like `engine.skip()`.
+
+### Immutable State
+
+`DJState` is a frozen Pydantic model. Logic functions return new copies via `model_copy(update={...})`. This eliminates race conditions by design — the server thread reads snapshots that can never be mutated out from under it.
+
+### Commands as Data
+
+Pure logic never executes side effects. Instead it returns command objects (`PlayTrackCommand`, `FindNeighborsCommand`, `ComputeMoodMaskCommand`, etc.) that the engine dispatches to the effects layer. This makes the logic testable and the control flow auditable.
+
+### One Implementation Per Concept
+
+Before the refactor, neighbor-finding was duplicated in 4 methods with inconsistent artist penalties. Now there is one `select_from_candidates()` function parameterized by penalty strength. Apply this principle to new features: parameterize, don't duplicate.
+
+---
+
+## Architecture Decisions
+
+### Database: PostgreSQL + pgvector
+
+All track metadata, 512D CLAP embeddings, and UMAP projections are stored in PostgreSQL with pgvector HNSW indexes. This replaced the previous SQLite + .npy + FAISS setup.
+
+- `DatabaseClient` (`effects/database.py`) owns all database access
+- Connection pooling via `ThreadedConnectionPool`
+- Vector search via `<->` operator (L2 distance) with HNSW indexes
+- Docker Compose available (`docker-compose.yml`) or use local PostgreSQL
+
+The SQLite database (`data/db.sqlite`) still exists for backward compatibility with tools and the listener/mapview runtime, but the DJ system uses PostgreSQL exclusively.
+
+### Embedding Space Usage
+
+Two embedding spaces serve different purposes:
+- **512D CLAP**: captures audio texture (timbre, energy, production). Used for **transit** between genre clusters and for normal DJ hops.
+- **5D UMAP**: captures genre structure (which tracks cluster together). Used for **dwell** at orbit anchors (staying within a genre).
+
+This split was empirically validated — 512D dwell drifts across genres (CLAP groups by audio texture, not genre), while 5D dwell stays coherent.
+
+### Orbit Navigation
+
+The orbit is a two-phase state machine cycling through anchor tracks:
+- **Dwell phase**: play music near the current anchor using 5D neighbor hops.
+- **Transit phase**: step through 512D space toward the next anchor.
+
+Anchor tracks are chosen by Claude from the full library. The orbit state machine is pure (`core/orbit_logic.py`) — all time-dependent decisions take `current_time` as a parameter.
 
 ### Credentials
-Spotify credentials come from environment variables only — **never from config.yaml**.
-- `SPOTIPY_CLIENT_ID`
-- `SPOTIPY_CLIENT_SECRET`
-- `SPOTIPY_REDIRECT_URI`
 
-`config.yaml` must not contain actual credential values. Use comments as placeholders.
+Spotify credentials come from environment variables only — never from config files.
+- `SPOTIPY_CLIENT_ID`, `SPOTIPY_CLIENT_SECRET`, `SPOTIPY_REDIRECT_URI`
 
-### Device Selection
-MPS/CPU selection happens once, in a shared helper (`albart/utils.py`), via:
-```python
-def get_device():
-    if torch.backends.mps.is_available():
-        return "mps"
-    return "cpu"
-```
-Never hardcode device strings elsewhere. Never make this a config option.
+### Display Backend (Listener/MapView)
 
-### Display Backend
-`DisplayBackend.show_frame(rgb_array: np.ndarray)` is the **only** way to update the display. Rules:
-- `display_sim.py` and `display_hub75.py` may only be imported in `runtime/run.py`.
-- All other runtime code receives a `DisplayBackend` instance and calls `show_frame`.
-- The backend is selected at startup based on `config.yaml:runtime.display_mode`.
-
-### FAISS Index + ID Map
-`data/faiss.index` and `data/faiss_ids.npy` are always written and read as a pair. A single helper function in `pipeline/embedder.py` owns both write operations, and a single helper in `runtime/lookup.py` owns both read operations.
-
-### Alias Sampling, Dwell, and Brightness (locked in)
-- **Sampling**: Vose's Alias Method over the full track set (all tracks, not top-N). Weights = normalized softmax over all distances. O(1) per draw.
-- **Dwell time**: Absolute, not relative to the best match. `dwell = clamp(exp(-dwell_k * d_i) * max_dwell, min_dwell, max_dwell)`. Strong match → 10s; background noise → everything floors at 1s.
-- **Brightness**: Nearest-neighbor distance only. `brightness = clamp(exp(-brightness_k * d_min), 0, 1)`. Fades to new target over `brightness_fade_seconds` when a new embedding arrives.
-- **With-replacement**: same cover may follow itself — natural extended display for strong matches.
-- `softmax_k`, `dwell_k`, `brightness_k` are independent — tune separately.
-- `embedding_interval_seconds: 0` means continuous (recompute immediately after finishing).
-
-### Embedding Space Usage (locked in)
-Two embedding spaces serve different purposes:
-- **512D CLAP** (raw audio embeddings): captures audio texture — timbre, energy, production. Used for **transit** between genre clusters and for normal DJ hops. Searched via FAISS index.
-- **5D UMAP** (pre-computed projection of 512D): captures genre structure — which tracks cluster together. Used for **dwell** at orbit anchors (staying within a genre). Searched via brute-force numpy distance.
-
-Do NOT mix these: dwell should use 5D, transit should use 512D. This split was empirically validated — 512D dwell drifts across genres (CLAP groups by audio texture, not genre), while 5D dwell stays coherent.
-
-### Orbit Navigation (locked in)
-The orbit is a two-phase state machine cycling through anchor tracks:
-- **Dwell phase** (~30 min): pick from K nearest unplayed tracks to the anchor in 5D UMAP space. Artist penalty 0.01× unless `allow_same_artist` is True.
-- **Transit phase** (~10 steps): fractional stepping through 512D space. Step 1/N of remaining distance each hop (N counts down from 10). Stop early when within 15% of initial distance. Artist penalty 0.01× applied via candidate pool.
-
-Anchor tracks are chosen by Claude from the full library (user describes a journey, Claude picks iconic tracks). Fuzzy matching handles separator variants (—, --, -, :) and partial/reversed artist-title matches.
-
-`allow_same_artist` is determined by a separate Claude call ("would same-artist runs make sense for this session?"). Defaults to False on failure.
-
-### Config
-All tunable values are in `config.yaml` and accessed through a loaded config dict passed at startup. No module-level constants for values the spec calls "configurable" or "default". Use `pyyaml` to load.
+`DisplayBackend.show_frame(rgb_array)` is the only way to update the display. Backend selected at startup from config. This applies to the listener and mapview — the DJ system uses Spotify for playback, not the display.
 
 ### Pipeline Idempotency
-- The pipeline never deletes rows or overwrites files without `--force`.
-- `embedding_status` is the canonical record of what's been processed.
-- File paths stored in the database are relative to the `data/` directory.
-- Album art deduplication: do NOT deduplicate by album — treat each track independently. Deduplication by `art_url` is acceptable if trivially easy, but not required.
 
-### Spotify Track Limit
-Use Spotify's `/me/top/tracks` with `time_range=long_term`, paginating at 50 per request. Accept whatever the API returns (likely ~100 unique tracks, not 1000). Do not special-case the limit.
+- The pipeline never deletes rows without `--force`
+- `embedding_status` is the canonical record of what's been processed
+- File paths stored in the database are relative to `data/`
 
 ### Logging
-Use the `logging` module throughout. No bare `print` statements except in CLI entry points for user-facing progress output (where `tqdm` is preferred). Log levels:
-- `INFO`: pipeline step completions, runtime startup events
-- `DEBUG`: per-track pipeline steps, per-cycle embedding timing
-- `WARNING`/`ERROR`: skipped tracks, download failures, inference errors
+
+Use the `logging` module throughout. No bare `print` except in CLI entry points (where `tqdm` is preferred).
 
 ---
 
@@ -96,57 +99,59 @@ Use the `logging` module throughout. No bare `print` statements except in CLI en
 ```
 ALBart/
   albart/
-    listener.py           # Entry: python -m albart.listener
-    mapview.py            # Entry: python -m albart.mapview
-    dj.py                 # Entry: python -m albart.dj
-    dj_server.py          # Entry: python -m albart.dj_server (control center API)
-    orbit.py              # Orbit navigation: anchors, dwell/transit state machine
-    text_embedder.py      # Lazy-loading CLAP text embedding (mood filtering)
-    utils.py              # Shared helpers: get_device(), load_config()
-    __init__.py
-    pipeline/
-      __init__.py
-      spotify.py          # Spotify API client and top tracks pull
-      downloader.py       # Preview MP3 and album art download
-      embedder.py         # CLAP inference, FAISS index build/save
-      database.py         # SQLite schema and CRUD
-      preprocess.py       # Image downsampling to 32x32
-      deezer.py           # Deezer preview fallback
-      itunes.py           # iTunes preview fallback
-      run_pipeline.py     # CLI entry point: python -m albart.pipeline.run_pipeline
-    runtime/
-      __init__.py
-      audio.py            # Mic capture, circular buffer, threading.Lock
-      embedder.py         # Runtime CLAP inference (loads model once at startup)
-      lookup.py           # FAISS query + alias sampling (single norm index)
-      display.py          # Abstract DisplayBackend base class
-      display_sim.py      # pygame simulated display (prototype)
-      display_hub75.py    # rpi-rgb-led-matrix display (production)
-      loop.py             # LED display loop
-      run.py              # Listener implementation
-      run_map.py          # MapView implementation
-      neighborhood_display.py # 3D OpenGL neighborhood view
-      map_display.py      # 2D UMAP map view
-      agc.py              # Automatic gain control
-      startup.py          # Startup animation
-  ui/                     # React frontend (Vite + TypeScript)
-    src/App.tsx           # DJ web UI
-  tools/
-    build_umap.py         # 2D UMAP projection
-    build_umap_5d.py      # 5D UMAP projection
-    build_voronoi.py      # Voronoi cluster labels (uses Claude API)
-    build_text_labels.py  # CLAP text embeddings vocabulary
-    dj_simulate.py        # Offline DJ trajectory simulation
-    test_transit.py       # Offline transit strategy testing
-    review_art.py         # 32×32 art inspection
-    reembed_existing.py   # Re-embed tracks (schema migration)
-    archive/              # Diagnostic scripts from development
-  setup_database.py       # One-command database build
+    core/                     # Pure logic — NO I/O imports allowed
+      state.py                # Frozen Pydantic: DJState, OrbitState, MoodState, etc.
+      commands.py             # Command types + LogicResult
+      navigation.py           # Main decision functions (on_poll_tick, etc.)
+      orbit_logic.py          # Pure orbit state machine
+      mood.py                 # Mood descriptor logic
+      sampling.py             # Unified weighted track selection
+      neighbor.py             # Neighbor query builder
+
+    effects/                  # Side effects — all I/O lives here
+      database.py             # PostgreSQL + pgvector client
+      spotify.py              # Spotify playback control
+      broadcast.py            # UDP broadcast to map display
+      udp_listener.py         # Live audio embedding receiver
+      migrate.py              # SQLite → PostgreSQL migration
+
+    server/                   # FastAPI thin adapter
+      app.py                  # API endpoints (reads snapshots, dispatches commands)
+      models.py               # Request/response Pydantic models
+
+    engine.py                 # DJ engine: poll loop, command dispatch, state owner
+
+    dj.py                     # CLI entry: python3 -m albart.dj
+    dj_server.py              # CLI entry: python3 -m albart.dj_server
+    listener.py               # CLI entry: python3 -m albart.listener
+    mapview.py                # CLI entry: python3 -m albart.mapview
+    orbit.py                  # Legacy orbit (kept for tools compatibility)
+    text_embedder.py          # Lazy-loading CLAP text embedding
+    utils.py                  # Shared helpers: get_device(), load_config()
+
+    pipeline/                 # Offline data pipeline
+      spotify.py              # Spotify API client
+      downloader.py           # Preview + art download
+      embedder.py             # CLAP inference + PostgreSQL storage
+      database.py             # Pipeline database access (delegates to effects/)
+      preprocess.py           # Image downsampling
+      deezer.py               # Deezer preview fallback
+      itunes.py               # iTunes preview fallback
+      run_pipeline.py         # CLI: python3 -m albart.pipeline.run_pipeline
+
+    runtime/                  # Listener/MapView runtime (uses legacy paths)
+      audio.py, embedder.py, lookup.py, loop.py, display.py, ...
+
+  ui/                         # React frontend (Vite + TypeScript)
+    src/App.tsx               # DJ web UI (API at http://127.0.0.1:8765)
+
+  tests/                      # Unit tests (pure logic, zero infrastructure)
+  tools/                      # Offline analysis and diagnostic scripts
+  docker-compose.yml          # PostgreSQL + pgvector
+  setup_database.py           # One-command database build
   config.yaml
   requirements.txt
-  data/                   # gitignored — all generated data
-  CLAUDE.md
-  albart_spec.md
+  data/                       # gitignored — generated data + art files
 ```
 
 ---
@@ -155,28 +160,46 @@ ALBart/
 
 | Package | Purpose |
 |---|---|
+| `psycopg2-binary` + `pgvector` | PostgreSQL + vector search |
 | `spotipy` | Spotify API client |
-| `requests` | HTTP downloads |
-| `Pillow` | Image processing and downsampling |
-| `torch` | CLAP model inference (MPS on Apple Silicon) |
-| `transformers` | CLAP model via HuggingFace (`laion/clap-htsat-unfused`) |
-| `faiss-cpu` | Vector similarity index |
-| `sounddevice` | Mic capture via InputStream callback |
-| `numpy` | Audio buffers, embedding math |
-| `pygame` + `PyOpenGL` | Window management + GPU-accelerated rendering |
+| `torch` + `transformers` | CLAP model inference (`laion/clap-htsat-unfused`) |
 | `fastapi` + `uvicorn` | DJ web server |
-| `anthropic` | Claude API (mood interpretation, Voronoi labels) |
-| `umap-learn` | 2D/5D dimensionality reduction |
-| `pyyaml` | Config file loading |
-| `tqdm` | Pipeline progress bars |
+| `anthropic` | Claude API (mood, orbit, Voronoi labels) |
+| `pydantic` | Immutable state models + API schemas |
+| `numpy` | Audio buffers, embedding math |
+| `sounddevice` | Mic capture (listener mode) |
+| `pygame` + `PyOpenGL` | Display rendering (listener/mapview) |
+| `umap-learn` | Dimensionality reduction |
 
 CLAP model: `laion/clap-htsat-unfused`, embedding dim 512, input 48kHz mono.
 
 ---
 
-## Development Phases
+## Development
 
-1. **Milestone 1** — Offline pipeline (Spotify pull → download → embed → FAISS index)
-2. **Milestone 2** — Art review tool (pygame utility to inspect 32x32 covers)
-3. **Milestone 3** — Simulated runtime (macOS, pygame display)
-4. **Milestone 4** — Pi deployment (HUB75 backend, systemd service)
+### Running
+
+```bash
+# Start PostgreSQL (if using Docker)
+docker compose up -d
+
+# Start the DJ server with hot-reload
+python3 -m albart.dj_server --reload
+
+# Start the React UI (separate terminal)
+cd ui && npm run dev
+
+# Run tests
+python3 -m pytest tests/ -v
+```
+
+### Testing
+
+The pure core has 78 unit tests that run in <200ms with zero infrastructure — no database, no Spotify, no network. When adding navigation logic, write tests against the core functions first.
+
+### Adding Features
+
+1. If it's a decision (which track, when to pick, how to filter): add it to `core/` as a pure function.
+2. If it needs I/O (API call, database query, file read): add it to `effects/`.
+3. Wire them together in `engine.py` via the command pattern.
+4. Expose to the UI via `server/app.py` endpoints.

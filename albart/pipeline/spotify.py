@@ -28,9 +28,13 @@ def get_client() -> spotipy.Spotify:
 
 
 def fetch_top_tracks(sp: spotipy.Spotify) -> list[dict]:
-    """
-    Fetch all available top tracks for long_term time range.
-    Returns a list of normalized track dicts.
+    """Fetch all available top tracks for long_term time range.
+
+    Despite widespread belief that Spotify's /me/top/tracks endpoint
+    caps at ~100 results, it actually returns the full long-term
+    listening history — typically 5000+ tracks for active listeners.
+    The endpoint paginates normally at 50 per request; just keep
+    following ``next`` until it's None.
     """
     tracks = []
     offset = 0

@@ -1,12 +1,13 @@
 """Simulate DJ trajectories without playing anything.
 
-Prints 50 tracks: 10 per set with long hops between sets.
-Uses the same hop logic as ALBart DJ (via DJ class).
+Uses the exact same pure logic as the live DJ (core/navigation.py),
+querying PostgreSQL for neighbors.  No Spotify connection needed.
 
 Usage:
-    python tools/dj_simulate.py
-    python tools/dj_simulate.py --seed "paint it black"
-    python tools/dj_simulate.py --sets 3 --per-set 15
+    python3 tools/dj_simulate.py
+    python3 tools/dj_simulate.py --seed "paint it black"
+    python3 tools/dj_simulate.py --sets 3 --per-set 15
+    python3 tools/dj_simulate.py --song-k 5
 """
 
 from __future__ import annotations
@@ -15,9 +16,15 @@ import argparse
 import sys
 from pathlib import Path
 
+import numpy as np
+
+# Ensure project root is on the path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from albart.dj import DJ, find_seed_track  # noqa: E402
+from albart.core.navigation import on_neighbors_found, on_track_played  # noqa: E402
+from albart.core.sampling import get_recent_artists, select_from_candidates  # noqa: E402
+from albart.core.state import DJState  # noqa: E402
+from albart.effects.database import DatabaseClient, DatabaseConfig  # noqa: E402
 
 
 def main() -> None:
@@ -29,109 +36,170 @@ def main() -> None:
     parser.add_argument("--per-set", type=int, default=10,
                         help="Tracks per set (default: 10)")
     parser.add_argument("--hop-multiplier", type=float, default=5.0,
-                        help="Long hop distance multiplier (default: 5×)")
+                        help="Long hop distance multiplier (default: 5x)")
+    parser.add_argument("--song-k", type=int, default=10,
+                        help="Candidate pool size (default: 10)")
+    parser.add_argument("--seed-rng", type=int, default=42,
+                        help="RNG seed for reproducibility")
     args = parser.parse_args()
 
-    # Create DJ but don't connect to Spotify — we only need the hop logic
-    dj = DJ.__new__(DJ)
-    # Manually init just the data parts (skip Spotify + UDP)
-    import logging
-    import numpy as np
-    import faiss
-    from albart.pipeline.database import DB_PATH, get_connection
-    from albart.pipeline.embedder import FAISS_NORM_INDEX_PATH, FAISS_NORM_IDS_PATH
-    from albart.utils import DATA_DIR
+    db = DatabaseClient(config=DatabaseConfig())
+    rng = np.random.default_rng(args.seed_rng)
+    total_tracks = db.get_total_tracks()
 
-    logging.basicConfig(level=logging.WARNING)
-    logging.getLogger("faiss.loader").setLevel(logging.ERROR)
-    logging.getLogger("dj_mode").setLevel(logging.WARNING)
+    print(f"Library: {total_tracks} tracks")
 
-    print("Loading data...")
-    dj._index = faiss.read_index(str(FAISS_NORM_INDEX_PATH))
-    ids_arr = np.load(str(FAISS_NORM_IDS_PATH), allow_pickle=True)
-    dj._id_list = [str(t) for t in ids_arr]
-    dj._N = len(dj._id_list)
-    dj._id_to_idx = {tid: i for i, tid in enumerate(dj._id_list)}
-    dj._embeddings = np.load(str(DATA_DIR / "embeddings_norm.npy")).astype(np.float32)
-
-    conn = get_connection(DB_PATH)
-    rows = conn.execute("SELECT track_id, title, artist FROM tracks").fetchall()
-    conn.close()
-    dj._db = {r["track_id"]: r for r in rows}
-
-    dj.hop_multiplier = args.hop_multiplier
-    dj._played = set()
-    dj._history = []
-    dj._rng = np.random.default_rng(42)
-    dj._mode = "exact"
-    dj._live_emb = None
-    dj._temperature = 0.5
-    dj._mood_embs = None
-
-    # Find seed
-    seed_tid = None
+    # Resolve seed
     if args.seed:
-        seed_tid = find_seed_track(args.seed, dj._db)
-        if seed_tid and seed_tid in dj._id_to_idx:
-            print(f"Seed: {dj._track_name(seed_tid)}")
-        else:
+        results = db.search_tracks(args.seed, limit=1)
+        if not results:
             print(f"Could not match '{args.seed}'")
             return
+        seed_tid = results[0].track_id
+        seed_name = f"{results[0].title} — {results[0].artist}"
     else:
-        seed_tid = dj._id_list[dj._rng.integers(0, dj._N)]
-        print(f"Random seed: {dj._track_name(seed_tid)}")
+        # Random seed
+        import psycopg2.extras
+        with db._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT track_id FROM tracks WHERE embedding_512 IS NOT NULL "
+                    "ORDER BY random() LIMIT 1"
+                )
+                seed_tid = cur.fetchone()[0]
+        track = db.get_track(seed_tid)
+        seed_name = f"{track.title} — {track.artist}" if track else seed_tid
 
-    dj._played.add(seed_tid)
-    dj._history.append(seed_tid)
-
-    total = args.sets * args.per_set
-    track_num = 0
+    # Initialize state
+    state = DJState(
+        song_k=args.song_k,
+        hop_multiplier=args.hop_multiplier,
+        total_tracks=total_tracks,
+        history=(seed_tid,),
+        played=frozenset({seed_tid}),
+    )
 
     print(f"\n{'─' * 80}")
     print(f"  {'#':>3}  {'L2':>7}  Track")
     print(f"{'─' * 80}")
+    print(f"  {1:>3}  {'seed':>7}  {seed_name}")
+
+    track_num = 1
+
+    def _pick_normal(st: DJState) -> tuple[DJState, str | None, float]:
+        """Pick the next normal hop. Returns (new_state, track_id, distance)."""
+        last_tid = st.history[-1]
+        emb = db.get_embedding_512(last_tid)
+        if emb is None:
+            return st, None, 0.0
+
+        candidates = db.find_neighbors_512d(emb, st.song_k, st.played)
+        if not candidates:
+            return st, None, 0.0
+
+        track_artists = db.get_artists_for_tracks([c[0] for c in candidates])
+        result = on_neighbors_found(st, candidates, track_artists, "normal", 0.0, rng)
+        next_tid = result.state.next_pick
+        if next_tid is None:
+            return result.state, None, 0.0
+
+        # Compute distance for display
+        next_emb = db.get_embedding_512(next_tid)
+        dist = float(np.linalg.norm(
+            next_emb.astype(np.float64) - emb.astype(np.float64)
+        )) if next_emb is not None else 0.0
+
+        # Record as played
+        result2 = on_track_played(result.state, next_tid, 0.0)
+        return result2.state, next_tid, dist
+
+    def _pick_long(st: DJState) -> tuple[DJState, str | None, float]:
+        """Pick a long hop. Returns (new_state, track_id, distance)."""
+        if len(st.history) < 2:
+            return _pick_normal(st)
+
+        target = db.compute_long_hop_target(
+            st.history[-2], st.history[-1], st.hop_multiplier, rng,
+        )
+        if target is None:
+            return _pick_normal(st)
+
+        candidates = db.find_neighbors_512d(target, 20, st.played)
+        if not candidates:
+            return _pick_normal(st)
+
+        track_artists = db.get_artists_for_tracks([c[0] for c in candidates])
+
+        # Use pending_hop_type to mark as long hop
+        st = st.model_copy(update={"pending_hop_type": "LONG"})
+        result = on_neighbors_found(st, candidates, track_artists, "LONG", 0.0, rng)
+        next_tid = result.state.next_pick
+        if next_tid is None:
+            return result.state, None, 0.0
+
+        # Compute distance from current track
+        curr_emb = db.get_embedding_512(st.history[-1])
+        next_emb = db.get_embedding_512(next_tid)
+        dist = float(np.linalg.norm(
+            next_emb.astype(np.float64) - curr_emb.astype(np.float64)
+        )) if curr_emb is not None and next_emb is not None else 0.0
+
+        result2 = on_track_played(result.state, next_tid, 0.0)
+        return result2.state, next_tid, dist
+
+    def _track_name(tid: str) -> str:
+        t = db.get_track(tid)
+        return f"{t.title} — {t.artist}" if t else tid
 
     for s in range(args.sets):
         if s > 0:
-            # Long hop
-            next_tid = dj._pick_long_hop()
+            # Long hop between sets
+            state, next_tid, dist = _pick_long(state)
             if next_tid:
-                d = float(np.linalg.norm(
-                    dj._get_embedding(next_tid).astype(np.float64) -
-                    dj._get_embedding(dj._history[-1]).astype(np.float64)
-                ))
-                dj._played.add(next_tid)
-                dj._history.append(next_tid)
                 track_num += 1
                 print(f"\n  {'═' * 76}")
-                print(f"  LONG HOP (×{dj.hop_multiplier:.0f} trajectory, L2={d:.4f})")
+                print(f"  LONG HOP (x{args.hop_multiplier:.0f} trajectory, L2={dist:.4f})")
                 print(f"  {'═' * 76}\n")
-                print(f"  {track_num:>3}  {d:>7.4f}  {dj._track_name(next_tid)}")
+                print(f"  {track_num:>3}  {dist:>7.4f}  {_track_name(next_tid)}")
                 start = 1
             else:
+                print("  ... could not find long hop target")
                 start = 0
         else:
-            print(f"  {1:>3}  {'seed':>7}  {dj._track_name(seed_tid)}")
-            track_num = 1
             start = 1
 
         for i in range(start, args.per_set):
-            emb = dj._get_embedding(dj._history[-1])
-            next_tid = dj._pick_normal_hop(emb)
+            state, next_tid, dist = _pick_normal(state)
             if not next_tid:
                 print("  ... no more unplayed tracks nearby")
                 break
-            d = float(np.linalg.norm(
-                dj._get_embedding(next_tid).astype(np.float64) -
-                emb.astype(np.float64)
-            ))
-            dj._played.add(next_tid)
-            dj._history.append(next_tid)
             track_num += 1
-            print(f"  {track_num:>3}  {d:>7.4f}  {dj._track_name(next_tid)}")
+            print(f"  {track_num:>3}  {dist:>7.4f}  {_track_name(next_tid)}")
 
     print(f"\n{'─' * 80}")
-    print(f"Total: {len(dj._played)} tracks played")
+    print(f"Total: {len(state.played)} tracks played")
+
+    # Stats
+    if len(state.history) >= 2:
+        dists = []
+        for i in range(1, len(state.history)):
+            e1 = db.get_embedding_512(state.history[i - 1])
+            e2 = db.get_embedding_512(state.history[i])
+            if e1 is not None and e2 is not None:
+                dists.append(float(np.linalg.norm(
+                    e2.astype(np.float64) - e1.astype(np.float64)
+                )))
+        if dists:
+            print(f"Hop distances: min={min(dists):.4f}  mean={np.mean(dists):.4f}  "
+                  f"max={max(dists):.4f}")
+
+    # Artist diversity
+    artists = set()
+    for tid in state.history:
+        t = db.get_track(tid)
+        if t:
+            artists.add(t.artist)
+    print(f"Unique artists: {len(artists)} / {len(state.history)} tracks")
 
 
 if __name__ == "__main__":

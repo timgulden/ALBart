@@ -83,9 +83,16 @@ def main():
     print("ALBart Database Setup")
     print("=" * 60)
 
+    # Step 0: Ensure PostgreSQL schema exists
+    run_step(
+        "PostgreSQL schema setup",
+        [sys.executable, "-c",
+         "from albart.effects.database import DatabaseClient; DatabaseClient().create_schema()"],
+    )
+
     # Step 1: Main pipeline (required)
     run_step(
-        "Pipeline: Spotify pull → download → embed → FAISS",
+        "Pipeline: Spotify pull → download → embed → PostgreSQL",
         [sys.executable, "-m", "albart.pipeline.run_pipeline"] + force,
     )
 

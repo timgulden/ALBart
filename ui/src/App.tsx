@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 
 const API = 'http://127.0.0.1:8765/api'
 
@@ -6,7 +6,7 @@ interface TrackInfo {
   track_id: string
   title: string
   artist: string
-  set_start?: boolean
+  set_start?: string | null  // "NEW SET", "DWELL", "TRANSIT", or null
 }
 
 interface OrbitAnchorInfo {
@@ -78,6 +78,9 @@ function App() {
   const [lastPollTime, setLastPollTime] = useState(0)
   const [seeking, setSeeking] = useState(false)  // true while user drags
   const [seekPos, setSeekPos] = useState(0)      // position while dragging
+  const volumeSentAt = useRef(0)      // timestamp: suppress poll volume until elapsed
+  const seekSentAt = useRef(0)        // timestamp: suppress poll progress until elapsed
+  const seekSentPos = useRef(0)       // the position we seeked to
   const [error, setError] = useState('')
   const [system, setSystem] = useState<SystemStatus | null>(null)
   const [orbitViewerOpen, setOrbitViewerOpen] = useState(false)
@@ -99,11 +102,26 @@ function App() {
           ])
           if (active && statusRes.ok) {
             const data: Status = await statusRes.json()
+            const seekLocked = Date.now() <= seekSentAt.current + 5000
+            if (seekLocked) {
+              // Override progress_ms in the status object so the ticker
+              // doesn't snap back to the pre-seek position.
+              data.progress_ms = seekSentPos.current
+            }
             setStatus(data)
-            setProgress(data.progress_ms)
+            if (!seekLocked) {
+              setProgress(data.progress_ms)
+              setLastPollTime(Date.now())
+            }
             setDuration(data.duration_ms)
-            setLastPollTime(Date.now())
-            if (data.volume >= 0) setVolume(data.volume)
+            if (data.volume >= 0) {
+              // Suppress poll volume for 5s after a user drag to prevent
+              // snap-back from stale Spotify values. External changes
+              // (e.g. phone) will sync once the lock expires.
+              if (Date.now() > volumeSentAt.current + 5000) {
+                setVolume(data.volume)
+              }
+            }
           }
           if (active && systemRes.ok) {
             setSystem(await systemRes.json())
@@ -215,9 +233,11 @@ function App() {
   useEffect(() => {
     if (!status?.playing || duration <= 0 || seeking) return
     const tick = setInterval(() => {
-      const elapsed = Date.now() - lastPollTime
-      const estimated = (status?.progress_ms ?? 0) + elapsed
-      setProgress(Math.min(estimated, duration))
+      const seekLocked = Date.now() <= seekSentAt.current + 5000
+      const base = seekLocked ? seekSentPos.current : (status?.progress_ms ?? 0)
+      const baseTime = seekLocked ? seekSentAt.current : lastPollTime
+      const elapsed = Date.now() - baseTime
+      setProgress(Math.min(base + elapsed, duration))
     }, 250)
     return () => clearInterval(tick)
   }, [status?.playing, status?.progress_ms, duration, lastPollTime, seeking])
@@ -235,6 +255,8 @@ function App() {
     // so it ticks from the new position, not the old one
     setProgress(seekPos)
     setLastPollTime(Date.now())
+    seekSentAt.current = Date.now()
+    seekSentPos.current = seekPos
     if (status) {
       status.progress_ms = seekPos
     }
@@ -251,6 +273,8 @@ function App() {
 
   const updateVolume = useCallback(async (v: number) => {
     setVolume(v)
+    volumeSentAt.current = Date.now()
+    volumeSentVal.current = v
     await fetch(`${API}/volume`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -483,31 +507,26 @@ function App() {
             <Card>
               <Label>Session History</Label>
               <div style={{ maxHeight: 400, overflowY: 'auto' }}>
-                {status.history[0]?.set_start && (
-                  <div style={{
-                    padding: '6px 0', fontSize: 12, color: '#4a6cf7',
-                    fontWeight: 600, letterSpacing: 1,
-                    borderBottom: status.history.length > 1 ? '1px solid #2a3050' : 'none',
-                    marginBottom: status.history.length > 1 ? 6 : 0,
-                  }}>
-                    ── NEW SET ──
-                  </div>
-                )}
-                {status.history.slice(1).map((t, i) => (
+                {status.history.map((t, i) => (
                   <div key={`${t.track_id}-${i}`}>
-                    <div style={{
-                      padding: '3px 0', fontSize: 14, color: '#999',
-                    }}>
-                      {t.title} — {t.artist}
-                    </div>
+                    {i > 0 && (
+                      <div style={{
+                        padding: '3px 0', fontSize: 14, color: '#999',
+                      }}>
+                        {t.title} — {t.artist}
+                      </div>
+                    )}
                     {t.set_start && (
                       <div style={{
-                        padding: '6px 0', fontSize: 12, color: '#4a6cf7',
+                        padding: '6px 0', fontSize: 12,
+                        color: t.set_start === 'ORBIT TRANSIT' ? '#f0c040'
+                             : t.set_start === 'ORBIT DWELL' ? '#2ecc71'
+                             : '#7c3aed',  // purple — matches New Set button
                         fontWeight: 600, letterSpacing: 1,
                         borderBottom: '1px solid #2a3050',
                         marginBottom: 6,
                       }}>
-                        ── NEW SET ──
+                        ── {t.set_start} ──
                       </div>
                     )}
                   </div>
