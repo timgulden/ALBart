@@ -4,11 +4,10 @@ Shows the live audio embedding as a shaded sphere at screen-center, surrounded
 by album art thumbnails from the entire library.
 
 Hybrid projection:
-  - Pre-computed 5-D UMAP captures global genre/mood structure.
-  - Per-cycle local PCA (5D→3D) on K nearest neighbors adapts the 3-D view
-    to the current query — showing the most interesting slice of the 5-D space.
-  - Actual 512-D L2 distances, shifted so the nearest track is at the origin,
-    determine radial distance from the sphere.
+  - Pre-computed 25-D UMAP captures genre structure with meaningful paths.
+  - Per-cycle local PCA (25D→3D) on K nearest neighbors in 25D adapts the
+    3-D view to the current query — showing the most interesting slice.
+  - 25-D L2 distances determine radial distance from the sphere.
   - OpenGL textured quads at float positions → GPU handles sub-pixel
     interpolation → perfectly smooth rotation and lerp.
 """
@@ -25,16 +24,12 @@ from pygame.locals import DOUBLEBUF, NOFRAME, OPENGL
 from OpenGL.GL import *  # noqa: F403,F401
 from PIL import Image
 
-from albart.pipeline.database import DB_PATH, get_connection
-from albart.pipeline.embedder import FAISS_NORM_IDS_PATH
+from albart.effects.database import DatabaseClient, DatabaseConfig
 from albart.utils import DATA_DIR
 
 logger = logging.getLogger(__name__)
 
 np.seterr(all="ignore")
-
-EMBEDDINGS_PATH = DATA_DIR / "embeddings_norm.npy"
-UMAP_5D_PATH    = DATA_DIR / "umap_5d.npy"
 
 
 class NeighborhoodDisplay:
@@ -75,21 +70,30 @@ class NeighborhoodDisplay:
         self._top1_track_id: Optional[str] = None
         self._label_text: str = ""
 
-        # ── Load embeddings ────────────────────────────────────────────────
-        logger.info("Loading embeddings...")
-        faiss_ids = np.load(str(FAISS_NORM_IDS_PATH), allow_pickle=True)
-        self._id_list: list[str] = [str(t) for t in faiss_ids]
+        # ── Load data from PostgreSQL ──────────────────────────────────────
+        logger.info("Loading tracks from PostgreSQL...")
+        db = DatabaseClient(config=DatabaseConfig())
+        import psycopg2.extras
+        with db._conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                cur.execute(
+                    "SELECT track_id, title, artist, art_path_32, "
+                    "art_path_original, umap_25d FROM tracks "
+                    "WHERE umap_25d IS NOT NULL"
+                )
+                rows = [dict(r) for r in cur.fetchall()]
+
+        self._id_list: list[str] = [r["track_id"] for r in rows]
         self._N = len(self._id_list)
+        logger.info("Loaded %d tracks with 25D embeddings", self._N)
 
-        all_emb = np.load(str(EMBEDDINGS_PATH)).astype(np.float32)
+        all_umap_25d = np.array(
+            [r["umap_25d"] for r in rows], dtype=np.float32
+        )
 
-        # ── Load 5D UMAP positions ─────────────────────────────────────────
-        logger.info("Loading 5D UMAP positions...")
-        all_umap_5d = np.load(str(UMAP_5D_PATH)).astype(np.float32)
-
-        # ── Deduplicate identical embeddings ───────────────────────────────
+        # Deduplicate identical embeddings
         _, unique_idx = np.unique(
-            all_emb.view(np.uint8).reshape(all_emb.shape[0], -1),
+            all_umap_25d.view(np.uint8).reshape(all_umap_25d.shape[0], -1),
             axis=0, return_index=True,
         )
         unique_idx.sort()
@@ -98,25 +102,20 @@ class NeighborhoodDisplay:
             logger.info("Deduplicated %d tracks (%d → %d)",
                         n_dupes, self._N, len(unique_idx))
             self._id_list = [self._id_list[i] for i in unique_idx]
-            all_emb = all_emb[unique_idx]
-            all_umap_5d = all_umap_5d[unique_idx]
+            rows = [rows[i] for i in unique_idx]
+            all_umap_25d = all_umap_25d[unique_idx]
             self._N = len(self._id_list)
 
-        self._all_embeddings = all_emb
-        self._all_umap_5d = all_umap_5d
-
+        self._all_umap_25d = all_umap_25d
         self._all_norms_sq = np.sum(
-            self._all_embeddings.astype(np.float64) ** 2, axis=1
+            all_umap_25d.astype(np.float64) ** 2, axis=1
         )
 
-        # ── Track metadata ────────────────────────────────────────────────
-        conn = get_connection(DB_PATH)
-        rows = conn.execute(
-            "SELECT track_id, title, artist, art_path_32, art_path_original "
-            "FROM tracks"
-        ).fetchall()
-        conn.close()
-        self._db_rows: dict = {row["track_id"]: row for row in rows}
+        # Track metadata and index lookup
+        self._db_rows: dict = {r["track_id"]: r for r in rows}
+        self._tid_to_idx: dict[str, int] = {
+            tid: i for i, tid in enumerate(self._id_list)
+        }
 
         # ── Load PIL images (for GL texture upload) ───────────────────────
         logger.info("Pre-loading thumbnail images...")
@@ -183,7 +182,7 @@ class NeighborhoodDisplay:
         self._L2_median_shift: float = 1.0
 
         self._W: Optional[np.ndarray] = None
-        self._cached_q_5d: Optional[np.ndarray] = None
+        self._cached_q_25d: Optional[np.ndarray] = None
         self._last_pca_emb: Optional[np.ndarray] = None
         self._recompute_threshold = recompute_threshold
         self._recompute_consecutive = recompute_consecutive
@@ -367,10 +366,10 @@ class NeighborhoodDisplay:
         nearest_L2 = L2[nearest_idx]
         weights = 1.0 / np.maximum(nearest_L2, 1e-8)
         weights /= weights.sum()
-        q_5d = (weights[:, None] * self._all_umap_5d[nearest_idx]).sum(axis=0)
-        self._cached_q_5d = q_5d.astype(np.float32)
-        rel_5d_nb = (self._all_umap_5d[nearest_idx] - q_5d).astype(np.float64)
-        cov = rel_5d_nb.T @ rel_5d_nb
+        q_25d = (weights[:, None] * self._all_umap_25d[nearest_idx]).sum(axis=0)
+        self._cached_q_25d = q_25d.astype(np.float32)
+        rel_25d_nb = (self._all_umap_25d[nearest_idx] - q_25d).astype(np.float64)
+        cov = rel_25d_nb.T @ rel_25d_nb
         _, _, Vt = np.linalg.svd(cov)
         W = Vt[:3, :].T.astype(np.float32)
         if self._W is not None:
@@ -382,17 +381,40 @@ class NeighborhoodDisplay:
         self._W = W
         self._last_pca_emb = np.nan_to_num(emb).copy()
         self._consecutive_far = 0
-        logger.info("PCA basis recomputed (5D→3D)")
+        logger.info("PCA basis recomputed (25D→3D)")
 
     def _compute_positions(self, emb: np.ndarray) -> np.ndarray:
-        q64 = np.nan_to_num(
-            emb, nan=0.0, posinf=0.0, neginf=0.0
-        ).astype(np.float64).ravel()
-        q_norm_sq = float(np.dot(q64, q64))
-        dots = self._all_embeddings.astype(np.float64) @ q64
-        L2_sq = self._all_norms_sq + q_norm_sq - 2.0 * dots
-        np.clip(L2_sq, 0.0, None, out=L2_sq)
-        L2 = np.sqrt(L2_sq)
+        """Compute 3D positions for all tracks relative to the query.
+
+        Uses 25D UMAP distances for everything: radial distance (how far)
+        and PCA-projected direction (which way).
+
+        Args:
+            emb: the 512D raw embedding from UDP.  We find the nearest
+                 track in 25D and use that as the query position.
+        """
+        # Map the incoming 512D embedding to the nearest track's 25D position.
+        # (We can't project arbitrary 512D points into UMAP space, so we
+        # use the top-1 track ID that comes with the UDP payload — but
+        # _compute_positions only receives the embedding.  As a fallback,
+        # find the nearest track by brute-force 25D distance from the
+        # cached query position, or use the weighted centroid.)
+        q_25d = np.nan_to_num(emb, nan=0.0, posinf=0.0, neginf=0.0
+                              ).astype(np.float64).ravel()
+
+        # If emb is 512D (from UDP), use the cached top-1 track's 25D position
+        if len(q_25d) != 25:
+            if self._top1_track_id and self._top1_track_id in self._tid_to_idx:
+                idx = self._tid_to_idx[self._top1_track_id]
+                q_25d = self._all_umap_25d[idx].astype(np.float64)
+            elif self._cached_q_25d is not None:
+                q_25d = self._cached_q_25d.astype(np.float64)
+            else:
+                return np.zeros((self._N, 3), dtype=np.float32)
+
+        # 25D L2 distances from query to all tracks
+        diff = self._all_umap_25d.astype(np.float64) - q_25d
+        L2 = np.sqrt(np.sum(diff ** 2, axis=1))
         L2_min = float(L2.min())
         L2_shifted = np.maximum(L2 - L2_min, 0.0)
         top_K = np.sort(L2_shifted)[:self._neighborhood_k]
@@ -401,8 +423,9 @@ class NeighborhoodDisplay:
         self._L2_median_shift = max(med, 1e-8)
         L2_norm = (L2_shifted / self._L2_median_shift).astype(np.float32)
 
+        # Decide whether to recompute PCA basis
         if self._last_pca_emb is not None:
-            dist_moved = float(np.linalg.norm(q64 - self._last_pca_emb))
+            dist_moved = float(np.linalg.norm(q_25d - self._last_pca_emb))
             if dist_moved > self._recompute_threshold:
                 self._consecutive_far += 1
             else:
@@ -411,16 +434,17 @@ class NeighborhoodDisplay:
         else:
             needs_recompute = True
         if needs_recompute:
-            self._recompute_pca_basis(emb, L2)
+            self._recompute_pca_basis(q_25d.astype(np.float32), L2)
 
+        # Project all tracks: direction from PCA, radius from 25D distance
         K_pos = min(self._neighborhood_k, self._N)
         nearest_idx = np.argpartition(L2, K_pos)[:K_pos]
         nearest_L2 = L2[nearest_idx]
         weights = 1.0 / np.maximum(nearest_L2, 1e-8)
         weights /= weights.sum()
-        q_5d = (weights[:, None] * self._all_umap_5d[nearest_idx]).sum(axis=0)
-        rel_5d = self._all_umap_5d - q_5d
-        rel_3d = rel_5d @ self._W
+        q_25d_weighted = (weights[:, None] * self._all_umap_25d[nearest_idx]).sum(axis=0)
+        rel_25d = self._all_umap_25d - q_25d_weighted
+        rel_3d = rel_25d @ self._W
         r_3d = np.linalg.norm(rel_3d, axis=1, keepdims=True)
         dirs = rel_3d / np.maximum(r_3d, 1e-8)
         return (dirs * L2_norm[:, None]).astype(np.float32)

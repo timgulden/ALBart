@@ -25,7 +25,7 @@ import numpy as np
 import pygame
 from PIL import Image
 
-from albart.pipeline.database import DB_PATH, get_connection
+from albart.effects.database import DatabaseClient, DatabaseConfig
 from albart.utils import DATA_DIR
 
 logger = logging.getLogger(__name__)
@@ -172,13 +172,17 @@ class MapDisplay:
         elif show_voronoi:
             logger.info("No voronoi_regions.json found — run tools/build_voronoi.py")
 
-        # Track metadata + art (loaded from DB)
-        conn = get_connection(DB_PATH)
-        rows = conn.execute(
-            "SELECT track_id, title, artist, art_path_32, art_path_original FROM tracks"
-        ).fetchall()
-        conn.close()
-        self._db_rows: dict = {row["track_id"]: row for row in rows}
+        # Track metadata + art (loaded from PostgreSQL)
+        db = DatabaseClient(config=DatabaseConfig())
+        import psycopg2.extras
+        with db._conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                cur.execute(
+                    "SELECT track_id, title, artist, art_path_32, "
+                    "art_path_original FROM tracks"
+                )
+                rows = cur.fetchall()
+        self._db_rows: dict = {row["track_id"]: dict(row) for row in rows}
 
         # pygame setup
         pygame.init()

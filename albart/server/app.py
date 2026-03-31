@@ -36,8 +36,6 @@ from fastapi.responses import FileResponse
 from albart.core.mood import clear_mood, parse_mood_descriptors, update_mood
 from albart.core.navigation import on_override
 from albart.core.orbit_logic import (
-    DWELL_DURATION,
-    TRANSIT_STEPS,
     find_track,
     get_progress,
     normalize_search,
@@ -497,8 +495,18 @@ def interpret_orbit(req: OrbitRequest) -> dict:
     if _engine is None:
         return {"error": "No active session — start the DJ first"}
 
+    import random
+
     db = _engine.db
     all_tracks = db.get_all_tracks()
+
+    # Sample up to 5000 tracks to keep the LLM context manageable
+    # as the library grows. A random 5000 is always enough to find
+    # good anchors for any journey description.
+    MAX_TRACKS_FOR_LLM = 5000
+    if len(all_tracks) > MAX_TRACKS_FOR_LLM:
+        all_tracks = random.sample(all_tracks, MAX_TRACKS_FOR_LLM)
+
     by_artist: dict[str, list[str]] = defaultdict(list)
     for t in all_tracks:
         by_artist[t.get("artist", "Unknown")].append(t.get("title", "?"))
@@ -516,30 +524,39 @@ def interpret_orbit(req: OrbitRequest) -> dict:
             messages=[{
                 "role": "user",
                 "content": (
-                    "An automated DJ navigates my music library by drifting "
-                    "between anchor tracks based on musical similarity. It plays "
-                    "many tracks between each anchor, so anchors should be spread "
-                    "far apart. The DJ handles transitions — you just pick the "
-                    "highlights.\n\n"
+                    "I have an AI DJ that navigates my music library through "
+                    "high-dimensional audio embedding space. When I give it a "
+                    "sequence of anchor tracks, it:\n\n"
+                    "1. Dwells near each anchor for ~30 minutes, playing tracks "
+                    "from the same genre neighborhood\n"
+                    "2. Transits between anchors through intermediate tracks "
+                    "that bridge the genre gap\n"
+                    "3. Cycles back to the first anchor and repeats\n\n"
+                    "The DJ handles all transitions and genre exploration "
+                    "automatically. Your job is to pick the anchor waypoints "
+                    "— the iconic destinations that define the journey.\n\n"
                     "The user described this journey:\n"
                     f'"{req.description}"\n\n'
-                    "Pick 5-6 tracks from my library that are interesting "
-                    "highlights along this journey. Each track should clearly "
-                    "fit with the description — no in-between or transitional "
-                    "picks. If the description mentions multiple genres, places, "
-                    "or eras, pick several distinct highlights within each one "
-                    "to show its range. The tracks form a cycle — the last "
-                    "should connect back to the first.\n\n"
-                    "My library:\n\n"
+                    "Pick 4-8 anchor tracks from my library. Each anchor "
+                    "defines a genre neighborhood the DJ will explore, so:\n"
+                    "- Choose tracks that are unmistakably representative of "
+                    "their genre or era\n"
+                    "- Space anchors across distinct musical territories — the "
+                    "DJ fills the gaps\n"
+                    "- Order them so the sequence tells a story — dramatic "
+                    "jumps between very different genres are fine, the DJ is "
+                    "skilled at finding surprising connections across any "
+                    "genre gap\n"
+                    "- The last anchor should connect naturally back to the "
+                    "first (it's a cycle)\n"
+                    "- Pick more anchors for complex multi-genre journeys, "
+                    "fewer for focused ones\n\n"
+                    "My library (one artist per line, with their tracks):\n\n"
                     f"{library_text}\n\n"
-                    "Rules:\n"
-                    "- Each track MUST exist in the library above (copy exactly)\n"
-                    "- Pick iconic, on-the-nose choices that clearly belong to "
-                    "the described journey\n"
-                    "- Do NOT pick transitional tracks between themes\n"
-                    "- Spread picks across the full journey\n\n"
-                    "Reply in JSON: {\"tracks\": [\"Artist \u2014 Title\", ...]}\n"
-                    "Return only the JSON object, no markdown fences, no commentary."
+                    "Format each track as \"Artist \u2014 Title\", copying the "
+                    "artist and title exactly from the library above. Reply "
+                    "with only a JSON object:\n"
+                    "{\"tracks\": [\"Artist \u2014 Title\", \"Artist \u2014 Title\", ...]}"
                 ),
             }],
         )

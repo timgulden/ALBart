@@ -11,10 +11,11 @@ import logging
 
 import numpy as np
 
-from albart.pipeline.embedder import (
-    FAISS_NORM_INDEX_PATH, FAISS_NORM_IDS_PATH,
-    load_index,
-)
+# Lazy import — the listener runtime still uses FAISS for the LED display.
+# This will be migrated to DatabaseClient in a future pass.
+def _get_faiss_paths():
+    from albart.utils import DATA_DIR
+    return DATA_DIR / "faiss_norm.index", DATA_DIR / "faiss_norm_ids.npy"
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +96,10 @@ class TrackLookup:
     """Single raw FAISS index lookup → AliasTable."""
 
     def __init__(self) -> None:
-        self._index, ids = load_index(FAISS_NORM_INDEX_PATH, FAISS_NORM_IDS_PATH)
+        import faiss
+        idx_path, ids_path = _get_faiss_paths()
+        self._index = faiss.read_index(str(idx_path))
+        ids = np.load(str(ids_path), allow_pickle=True)
         self._id_list = [str(t) for t in ids]
         logger.info("TrackLookup ready: %d tracks", self._index.ntotal)
 

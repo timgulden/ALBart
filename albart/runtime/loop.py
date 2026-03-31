@@ -251,12 +251,9 @@ class DisplayLoop:
         if track_id in self._art_cache:
             return self._art_cache[track_id]
 
-        from albart.pipeline.database import DB_PATH, get_connection
-        conn = get_connection(DB_PATH)
-        row = conn.execute(
-            "SELECT art_path_32, title, artist FROM tracks WHERE track_id = ?", (track_id,)
-        ).fetchone()
-        conn.close()
+        from albart.effects.database import DatabaseClient, DatabaseConfig
+        db = DatabaseClient(config=DatabaseConfig())
+        row = db.get_track_metadata(track_id)
 
         if row and row["art_path_32"]:
             try:
