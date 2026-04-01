@@ -81,6 +81,7 @@ function App() {
   const [seeking, setSeeking] = useState(false)  // true while user drags
   const [seekPos, setSeekPos] = useState(0)      // position while dragging
   const volumeSentAt = useRef(0)      // timestamp: suppress poll volume until elapsed
+  const volumeSentVal = useRef(0)    // the volume value we sent (suppress poll snap-back)
   const seekSentAt = useRef(0)        // timestamp: suppress poll progress until elapsed
   const seekSentPos = useRef(0)       // the position we seeked to
   const [error, setError] = useState('')
