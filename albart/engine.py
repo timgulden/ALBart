@@ -9,6 +9,8 @@ Threading model:
   - Server thread: reads via ``get_snapshot()`` (lock-protected).
   - UDP listener thread: writes to its own locked field; engine reads
     via ``UDPListener.get_latest()``.
+  - Ingestion thread: background ThreadPoolExecutor for on-the-fly
+    track ingestion (max 1 worker).
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from __future__ import annotations
 import logging
 import time
 import threading
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -28,6 +31,7 @@ from albart.core.commands import (
     ComputeMoodMaskCommand,
     ComputeTransitTargetCommand,
     FindNeighborsCommand,
+    IngestTrackCommand,
     PlayTrackCommand,
     ResumePlaybackCommand,
     UpdateOrbitPositionCommand,
@@ -72,11 +76,15 @@ class Engine:
         song_k: int = 10,
         hop_multiplier: float = 5.0,
         hop_interval_minutes: float = 30.0,
+        projector=None,  # UmapProjector | None
+        norm_target: float = 0.12,
     ) -> None:
         self._db = db
         self._spotify = spotify
         self._broadcast = broadcast
         self._udp = udp_listener
+        self._projector = projector
+        self._norm_target = norm_target
 
         self._state = DJState(
             mode=mode,
@@ -96,6 +104,13 @@ class Engine:
         # Action queue for server → engine communication
         self._action_queue: list[Callable[[DJState], DJState]] = []
         self._action_lock = threading.Lock()
+
+        # Background ingestion of unknown tracks
+        self._ingestion_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="Ingest",
+        )
+        self._ingestion_futures: dict[str, Future] = {}
+        self._clap_model = None  # lazy-loaded on first ingestion
 
     # ── Thread-safe interface for the server ──────────────────────────
 
@@ -367,6 +382,16 @@ class Engine:
                 # with a placeholder (it can't call the database)
                 state = self._patch_transit_distance(state)
 
+                # In roomear mode, broadcast live embedding every tick
+                if state.mode == "roomear" and live_emb is not None and state.history:
+                    self._broadcast.broadcast_raw(live_emb, state.history[-1])
+
+                # Check if current track is unknown → trigger ingestion
+                state = self._maybe_ingest_unknown(state)
+
+                # Check completed ingestion futures
+                state = self._check_ingestion_completions(state)
+
                 if result.log_message:
                     logger.info(result.log_message)
 
@@ -399,13 +424,14 @@ class Engine:
                 })
                 return state
             else:
-                # Unknown track — let it finish
-                logger.info("Current track not in library — will take control when it ends")
+                # Unknown track — ingest in background, let it finish playing
+                logger.info("Current track not in library — ingesting in background")
                 state = state.model_copy(update={
                     "history": (*state.history, seed_track_id),
                     "played": state.played | {seed_track_id},
                     "last_hop_time": time.monotonic(),
                 })
+                self._start_ingestion(state, seed_track_id)
                 return state
 
         # Nothing playing — try to pick a random track, but don't fail
@@ -481,11 +507,33 @@ class Engine:
             elif isinstance(cmd, BroadcastToMapCommand):
                 last_tid = state.history[-1] if state.history else None
                 if last_tid:
-                    known = self._db.get_embedding_25d(last_tid) is not None
-                    if known:
-                        self._broadcast.broadcast_track(cmd.track_id, self._db)
-                    elif live_emb is not None:
+                    if state.mode == "roomear" and live_emb is not None:
+                        # In roomear mode, always send live audio embedding
                         self._broadcast.broadcast_raw(live_emb, last_tid)
+                    else:
+                        known = self._db.get_embedding_25d(last_tid) is not None
+                        if known:
+                            self._broadcast.broadcast_track(cmd.track_id, self._db)
+                        else:
+                            # Unknown track: broadcast metadata immediately.
+                            # Use live audio embedding if available, otherwise
+                            # use the previous track's stored embedding so
+                            # MapView holds position while showing the new label.
+                            title, artist = self._get_track_display(last_tid)
+                            if live_emb is not None:
+                                self._broadcast.broadcast_raw(
+                                    live_emb, last_tid,
+                                    title=title, artist=artist,
+                                )
+                            else:
+                                prev_tid = self._last_known_broadcast_tid(state)
+                                if prev_tid:
+                                    emb = self._db.get_embedding_512(prev_tid)
+                                    if emb is not None:
+                                        self._broadcast.broadcast_raw(
+                                            emb, last_tid,
+                                            title=title, artist=artist,
+                                        )
 
             elif isinstance(cmd, ResumePlaybackCommand):
                 self._spotify.resume()
@@ -496,6 +544,9 @@ class Engine:
 
             elif isinstance(cmd, UpdateOrbitPositionCommand):
                 pass  # Progress tracked via state.orbit.last_played_tid
+
+            elif isinstance(cmd, IngestTrackCommand):
+                state = self._start_ingestion(state, cmd.track_id)
 
         return state
 
@@ -514,8 +565,17 @@ class Engine:
             target = self._db.get_embedding_25d(cmd.target_track_id)
             if target is None:
                 logger.debug("No 25D embedding for %s", cmd.target_track_id)
+                # Roomear fallback: project live embedding to 25D
+                if state.mode == "roomear" and live_emb is not None and self._projector is not None:
+                    target = self._projector.project(live_emb)
+                    logger.info("Using roomear live embedding (projected to 25D)")
         else:
             target = None
+
+        # Roomear mode: if no stored embedding, use live audio
+        if target is None and state.mode == "roomear" and live_emb is not None and self._projector is not None:
+            target = self._projector.project(live_emb)
+            logger.info("Using roomear live embedding for neighbor search")
 
         if target is None:
             logger.debug("No embedding available for neighbor search")
@@ -705,7 +765,118 @@ class Engine:
             )
         return state
 
+    # ── Track ingestion ────────────────────────────────────────────
+
+    def _get_clap_model(self) -> tuple:
+        """Lazy-load CLAP model for ingestion (heavy, ~300MB)."""
+        if self._clap_model is None:
+            from albart.pipeline.embedder import load_model
+            model, processor, device = load_model(allow_mps=True)
+            self._clap_model = (model, processor, device)
+            logger.info("CLAP model loaded for ingestion (device=%s)", device)
+        return self._clap_model
+
+    def _start_ingestion(self, state: DJState, track_id: str) -> DJState:
+        """Launch background ingestion if not already running for this track."""
+        if track_id in self._ingestion_futures:
+            return state
+        if track_id in state.ingesting_tracks:
+            return state
+        # Skip if already in database with embedding
+        if self._db.get_embedding_25d(track_id) is not None:
+            return state
+
+        from albart.effects.ingest import ingest_track
+
+        clap_model, clap_processor, clap_device = self._get_clap_model()
+        future = self._ingestion_executor.submit(
+            ingest_track,
+            track_id,
+            self._spotify.sp,
+            self._db,
+            self._projector,
+            clap_model,
+            clap_processor,
+            clap_device,
+            self._norm_target,
+        )
+        self._ingestion_futures[track_id] = future
+        state = state.model_copy(update={
+            "ingesting_tracks": state.ingesting_tracks | {track_id},
+        })
+        logger.info("Started background ingestion for %s", track_id)
+        return state
+
+    def _check_ingestion_completions(self, state: DJState) -> DJState:
+        """Check for completed ingestion futures and update state."""
+        completed = []
+        for tid, future in self._ingestion_futures.items():
+            if future.done():
+                try:
+                    success = future.result()
+                    if success:
+                        logger.info("Ingestion complete: %s", tid)
+                        state = state.model_copy(update={
+                            "total_tracks": self._db.get_total_tracks(),
+                        })
+                    else:
+                        logger.warning("Ingestion returned False for %s", tid)
+                except Exception as e:
+                    logger.error("Ingestion failed for %s: %s", tid, e)
+                completed.append(tid)
+        for tid in completed:
+            del self._ingestion_futures[tid]
+        if completed:
+            remaining = state.ingesting_tracks - set(completed)
+            state = state.model_copy(update={"ingesting_tracks": remaining})
+        return state
+
+    def _maybe_ingest_unknown(self, state: DJState) -> DJState:
+        """If the current Spotify track is unknown, trigger ingestion."""
+        pb = state.playback
+        if not pb.current_track_id or not pb.is_playing:
+            return state
+        tid = pb.current_track_id
+        if tid in state.ingesting_tracks:
+            return state
+        if tid in self._ingestion_futures:
+            return state
+        if self._db.get_embedding_25d(tid) is not None:
+            return state
+        return self._start_ingestion(state, tid)
+
     # ── Helpers ──────────────────────────────────────────────────────
+
+    def _last_known_broadcast_tid(self, state: DJState) -> Optional[str]:
+        """Find the most recent track in history that has a stored embedding."""
+        for tid in reversed(state.history):
+            if self._db.get_embedding_512(tid) is not None:
+                return tid
+        return None
+
+    def _get_track_display(self, track_id: str) -> tuple[str | None, str | None]:
+        """Get display title/artist for a track, from cache/DB/Spotify API."""
+        if not hasattr(self, "_display_cache"):
+            self._display_cache: dict[str, tuple[str | None, str | None]] = {}
+        if track_id in self._display_cache:
+            return self._display_cache[track_id]
+        # Try database first (fast, works for known tracks)
+        track = self._db.get_track(track_id)
+        if track:
+            result = (track.title, track.artist)
+            self._display_cache[track_id] = result
+            return result
+        # Try Spotify API (for unknown tracks being ingested)
+        try:
+            item = self._spotify.sp.track(track_id)
+            title = item.get("name")
+            artists = item.get("artists", [])
+            artist = ", ".join(a["name"] for a in artists) if artists else None
+            result = (title, artist)
+            self._display_cache[track_id] = result
+            return result
+        except Exception:
+            return None, None
 
     def _check_override(self, state: DJState) -> Optional[str]:
         """Check for map click override file."""

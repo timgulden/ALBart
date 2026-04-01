@@ -41,9 +41,9 @@ def main() -> None:
         help="Long hop distance multiplier (default: 5x)",
     )
     parser.add_argument(
-        "--mode", type=str, default="exact", choices=["exact", "listen"],
+        "--mode", type=str, default="exact", choices=["exact", "roomear"],
         help="exact: hop from stored preview embedding (default). "
-             "listen: hop from live audio embedding.",
+             "roomear: hop from live audio embedding via RoomEar.",
     )
     parser.add_argument(
         "--port", type=int, default=57002,
@@ -65,11 +65,25 @@ def main() -> None:
     from albart.effects.spotify import SpotifyClient
     from albart.effects.udp_listener import UDPListener
     from albart.engine import Engine
+    from albart.utils import DATA_DIR, load_config
 
     db = DatabaseClient(config=DatabaseConfig())
     spotify = SpotifyClient.create()
     broadcast = BroadcastClient()
     udp = UDPListener(port=args.port)
+
+    # Load parametric UMAP projector if available (needed for roomear mode + ingestion)
+    projector = None
+    config = load_config()
+    model_path = config.get("umap_25d", {}).get("model_path", "data/umap_25d_model/model.pt")
+    full_model_path = DATA_DIR.parent / model_path
+    if full_model_path.exists():
+        from albart.effects.umap_projector import UmapProjector
+        projector = UmapProjector.load(full_model_path)
+    elif args.mode == "roomear":
+        logger.warning("No parametric UMAP model found at %s — roomear mode will be limited", full_model_path)
+
+    norm_target = float(config.get("pipeline", {}).get("norm_target", 0.12))
 
     engine = Engine(
         db=db,
@@ -80,6 +94,8 @@ def main() -> None:
         song_k=max(1, min(50, args.song_k)),
         hop_multiplier=args.hop_multiplier,
         hop_interval_minutes=args.hop_interval,
+        projector=projector,
+        norm_target=norm_target,
     )
 
     # Resolve seed

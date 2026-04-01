@@ -94,6 +94,16 @@ class UpdateOrbitPositionCommand(BaseModel, frozen=True):
     track_id: str
 
 
+class IngestTrackCommand(BaseModel, frozen=True):
+    """Trigger background ingestion of an unknown Spotify track.
+
+    The engine dispatches this to a background thread that downloads
+    the preview, computes CLAP embedding + 25D UMAP projection, and
+    stores everything in PostgreSQL.
+    """
+    track_id: str
+
+
 # ---------------------------------------------------------------------------
 # Union of all command types
 # ---------------------------------------------------------------------------
@@ -107,6 +117,7 @@ Command = Union[
     ComputeLongHopTargetCommand,
     ComputeMoodMaskCommand,
     UpdateOrbitPositionCommand,
+    IngestTrackCommand,
 ]
 
 

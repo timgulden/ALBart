@@ -1,21 +1,17 @@
-"""FAISS nearest-neighbor lookup, Vose alias table, dwell and brightness.
+"""Nearest-neighbor lookup, Vose alias table, dwell and brightness.
 
-Single-index strategy: queries the norm FAISS index (RMS-normalized to 0.12)
-and ranks tracks by L2 distance.  Sampling weights are geometric over rank.
-Brightness and dwell are calibrated from the nearest-neighbor distance.
+Uses PostgreSQL + pgvector (via DatabaseClient) for all neighbor queries.
 """
 
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 
 import numpy as np
 
-# Lazy import — the listener runtime still uses FAISS for the LED display.
-# This will be migrated to DatabaseClient in a future pass.
-def _get_faiss_paths():
-    from albart.utils import DATA_DIR
-    return DATA_DIR / "faiss_norm.index", DATA_DIR / "faiss_norm_ids.npy"
+if TYPE_CHECKING:
+    from albart.effects.database import DatabaseClient
 
 logger = logging.getLogger(__name__)
 
@@ -92,16 +88,13 @@ class AliasTable:
         return self.track_ids[idx], float(self.dwell_times[idx])
 
 
-class TrackLookup:
-    """Single raw FAISS index lookup → AliasTable."""
+class DatabaseTrackLookup:
+    """pgvector-backed nearest-neighbor lookup → AliasTable."""
 
-    def __init__(self) -> None:
-        import faiss
-        idx_path, ids_path = _get_faiss_paths()
-        self._index = faiss.read_index(str(idx_path))
-        ids = np.load(str(ids_path), allow_pickle=True)
-        self._id_list = [str(t) for t in ids]
-        logger.info("TrackLookup ready: %d tracks", self._index.ntotal)
+    def __init__(self, db: DatabaseClient) -> None:
+        self._db = db
+        total = db.get_total_tracks()
+        logger.info("DatabaseTrackLookup ready: %d tracks with embeddings", total)
 
     def query(
         self,
@@ -116,16 +109,24 @@ class TrackLookup:
         min_dwell: float = 1.0,
         max_dwell: float = 10.0,
     ) -> AliasTable:
-        """Query raw FAISS index, return AliasTable sorted by L2 distance."""
-        q = embedding.reshape(1, -1).astype(np.float32)
-        dists, idxs = self._index.search(q, sampling_top_n)
+        """Query pgvector for nearest neighbors, return AliasTable."""
+        candidates = self._db.find_neighbors_512d(
+            embedding, k=sampling_top_n,
+        )
 
-        top_ids = []
-        for dist, idx in zip(dists[0], idxs[0]):
-            if idx >= 0:
-                top_ids.append(self._id_list[idx])
+        if not candidates:
+            logger.warning("No neighbors found — returning empty AliasTable")
+            return AliasTable(
+                track_ids=[], weights=np.array([]),
+                d_min_raw=1.0,
+                dwell_k=dwell_k, dwell_floor=dwell_floor,
+                brightness_k=brightness_k, brightness_floor=brightness_floor,
+                brightness_power=brightness_power,
+                min_dwell=min_dwell, max_dwell=max_dwell,
+            )
 
-        d_min_raw = float(dists[0][0]) if len(dists[0]) > 0 else 1.0
+        top_ids = [c[0] for c in candidates]
+        d_min_raw = candidates[0][1]
 
         weights = np.array(
             [sampling_rank_decay ** i for i in range(len(top_ids))],

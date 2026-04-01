@@ -31,7 +31,7 @@ class SimDisplay(DisplayBackend):
         self._grid_size = LED_SIZE * scale
         pygame.init()
         pygame.font.init()
-        self._font = pygame.font.SysFont("monospace", 13)
+        self._font = pygame.font.SysFont("applesdgothicneo", 13)
         self._text_bar = self._font.get_height() + 8  # padding above and below
         self.screen = pygame.display.set_mode((self._grid_size, self._grid_size + self._text_bar))
         pygame.display.set_caption("ALBart — Simulated Display")

@@ -48,14 +48,26 @@ class BroadcastClient:
         except Exception as e:
             logger.warning("Map broadcast failed: %s", e)
 
-    def broadcast_raw(self, embedding: np.ndarray, track_id: str) -> None:
+    def broadcast_raw(
+        self,
+        embedding: np.ndarray,
+        track_id: str,
+        *,
+        title: str | None = None,
+        artist: str | None = None,
+    ) -> None:
         """Send a raw embedding (e.g. live audio) to the map display."""
         try:
-            data = pickle.dumps({
+            payload: dict = {
                 "raw": embedding,
                 "top1": track_id,
                 "d_min_raw": 0.05,
-            })
+            }
+            if title is not None:
+                payload["title"] = title
+            if artist is not None:
+                payload["artist"] = artist
+            data = pickle.dumps(payload)
             self._sock.sendto(data, ("127.0.0.1", self.port))
         except Exception as e:
             logger.warning("Map broadcast failed: %s", e)

@@ -109,8 +109,10 @@ def on_poll_tick(
         return LogicResult(state=state, commands=commands)
 
     # ── Manual track change detection ────────────────────────────────
-    if current != last_tid and current not in state.history[-3:] and state.next_pick is None:
-        # User changed the track in Spotify — follow along
+    if current != last_tid and state.next_pick is None:
+        # User changed the track in Spotify — follow along.
+        # Allow re-playing tracks already in history (e.g. user switches
+        # back to a just-ingested track).
         state = state.model_copy(update={
             "played": state.played | {current},
             "history": (*state.history, current),
@@ -121,6 +123,10 @@ def on_poll_tick(
             commands=[BroadcastToMapCommand(track_id=current)],
             log_message=f"Manual change: {current}",
         )
+
+    # ── Spotify Control mode: just follow, don't pick ──────────────
+    if not state.dj_active:
+        return LogicResult(state=state, commands=commands)
 
     # ── Pending pick: play when song ends ────────────────────────────
     remaining = _remaining_ms(playback, now)

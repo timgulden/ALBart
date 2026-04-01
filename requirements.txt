@@ -3,7 +3,8 @@ requests
 Pillow
 torch
 transformers
-faiss-cpu
+psycopg2-binary
+pgvector
 sounddevice
 numpy
 pygame

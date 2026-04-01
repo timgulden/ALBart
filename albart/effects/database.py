@@ -235,6 +235,19 @@ class DatabaseClient:
                     WHERE track_id = %s
                 """, (embedding_512, track_id))
 
+    def upsert_umap_25d(
+        self,
+        track_id: str,
+        umap_25d: np.ndarray,
+    ) -> None:
+        """Update only the 25D UMAP projection for a track."""
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE tracks SET umap_25d = %s WHERE track_id = %s",
+                    (umap_25d, track_id),
+                )
+
     def get_track(self, track_id: str) -> Optional[TrackRef]:
         with self._conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:

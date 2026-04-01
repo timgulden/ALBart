@@ -71,9 +71,25 @@ from albart.server.models import (
     TrackInfo,
     VolumeUpdate,
 )
-from albart.utils import DATA_DIR
+from albart.utils import DATA_DIR, load_config
 
 logger = logging.getLogger("albart.server")
+
+
+def _load_projector():
+    """Load parametric UMAP projector if model exists."""
+    config = load_config()
+    model_path = config.get("umap_25d", {}).get("model_path", "data/umap_25d_model/model.pt")
+    full_path = DATA_DIR.parent / model_path
+    if full_path.exists():
+        from albart.effects.umap_projector import UmapProjector
+        return UmapProjector.load(full_path)
+    return None
+
+
+def _get_norm_target() -> float:
+    config = load_config()
+    return float(config.get("pipeline", {}).get("norm_target", 0.12))
 
 app = FastAPI(title="ALBart DJ", version="2.0")
 app.add_middleware(
@@ -183,6 +199,8 @@ def get_status() -> StatusResponse:
         duration_ms=state.playback.duration_ms,
         song_k=state.song_k,
         set_distance=state.hop_multiplier,
+        mode=state.mode,
+        dj_active=state.dj_active,
         mood_text=state.mood.mood_text,
         mood_descriptors=list(state.mood.descriptors),
         mood_threshold=state.mood.threshold,
@@ -221,6 +239,8 @@ def start_session(req: StartRequest) -> dict:
             song_k=max(1, min(50, req.song_k)),
             hop_multiplier=req.set_distance,
             hop_interval_minutes=req.hop_interval,
+            projector=_load_projector(),
+            norm_target=_get_norm_target(),
         )
 
         # Handle mood
@@ -294,6 +314,46 @@ def set_set_distance(req: SetDistanceUpdate) -> dict:
     val = max(1.0, min(20.0, req.set_distance))
     _engine.update_param("hop_multiplier", val)
     return {"set_distance": val}
+
+
+@app.put("/api/mode")
+def set_mode(req: dict) -> dict:
+    """Switch DJ input mode: 'exact' or 'roomear'."""
+    if _engine is None:
+        return {"error": "No active session"}
+    mode = req.get("mode", "exact")
+    if mode not in ("exact", "roomear"):
+        return {"error": f"Invalid mode: {mode}"}
+    _engine.update_param("mode", mode)
+    logger.info("Mode switched to: %s", mode)
+    return {"mode": mode}
+
+
+@app.get("/api/mode")
+def get_mode() -> dict:
+    """Get current DJ input mode and live embedding status."""
+    if _engine is None:
+        return {"mode": "exact", "live_emb": False, "dj_active": True}
+    emb, top1 = _engine._udp.get_latest()
+    state = _engine.get_snapshot()
+    return {
+        "mode": state.mode,
+        "dj_active": state.dj_active,
+        "live_emb": emb is not None,
+        "live_top1": top1,
+    }
+
+
+@app.put("/api/dj_active")
+def set_dj_active(req: dict) -> dict:
+    """Toggle DJ Control (active) vs Spotify Control (passive)."""
+    if _engine is None:
+        return {"error": "No active session"}
+    active = bool(req.get("dj_active", True))
+    _engine.update_param("dj_active", active)
+    label = "DJ Control" if active else "Spotify Control"
+    logger.info("Switched to %s", label)
+    return {"dj_active": active}
 
 
 # ── Mood ─────────────────────────────────────────────────────────────
@@ -759,6 +819,8 @@ def auto_start() -> None:
         _engine = Engine(
             db=db, spotify=spotify, broadcast=broadcast,
             udp_listener=udp, mode="exact", song_k=10,
+            projector=_load_projector(),
+            norm_target=_get_norm_target(),
         )
         pb = spotify.poll_playback()
         seed = pb.current_track_id if pb.is_playing else None

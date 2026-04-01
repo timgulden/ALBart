@@ -51,7 +51,7 @@ def fetch_top_tracks(sp: spotipy.Spotify) -> list[dict]:
             break
 
         for item in items:
-            track = _normalize_track(item)
+            track = normalize_track(item)
             if track is not None:
                 tracks.append(track)
 
@@ -63,8 +63,12 @@ def fetch_top_tracks(sp: spotipy.Spotify) -> list[dict]:
     return tracks
 
 
-def _normalize_track(item: dict) -> dict | None:
-    """Extract relevant fields from a Spotify track object."""
+def normalize_track(item: dict) -> dict | None:
+    """Extract relevant fields from a Spotify track object.
+
+    Works with both top-tracks response items and single-track API
+    responses (``sp.track(track_id)``).
+    """
     try:
         track_id = item["id"]
         title = item["name"]

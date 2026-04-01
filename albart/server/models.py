@@ -100,6 +100,8 @@ class StatusResponse(BaseModel):
     duration_ms: int = 0
     song_k: int
     set_distance: float
+    mode: str = "exact"
+    dj_active: bool = True
     mood_text: Optional[str] = None
     mood_descriptors: list[str]
     mood_threshold: float

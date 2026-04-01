@@ -37,6 +37,8 @@ interface Status {
   duration_ms: number
   song_k: number
   set_distance: number
+  mode: string
+  dj_active: boolean
   mood_text: string | null
   mood_descriptors: string[]
   mood_threshold: number
@@ -286,15 +288,28 @@ function App() {
     await fetch(`${API}/new_set`, { method: 'POST' })
   }, [])
 
+  const toggleMode = useCallback(async () => {
+    const newMode = status?.mode === 'roomear' ? 'exact' : 'roomear'
+    await fetch(`${API}/mode`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: newMode }),
+    })
+  }, [status?.mode])
+
   const toggleMapView = useCallback(async () => {
     const running = system?.mapview.running
     await fetch(`${API}/mapview/${running ? 'stop' : 'start'}`, { method: 'POST' })
   }, [system])
 
-  const toggleListener = useCallback(async () => {
-    const running = system?.listener.running
-    await fetch(`${API}/listener/${running ? 'stop' : 'start'}`, { method: 'POST' })
-  }, [system])
+  const toggleDjActive = useCallback(async () => {
+    const newActive = !(status?.dj_active ?? true)
+    await fetch(`${API}/dj_active`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dj_active: newActive }),
+    })
+  }, [status?.dj_active])
 
   const interpretOrbit = useCallback(async () => {
     if (!orbitJourney.trim()) return
@@ -552,13 +567,13 @@ function App() {
                 {system?.mapview.running ? 'Stop MapView' : 'Start MapView'}
               </button>
               <button
-                onClick={toggleListener}
+                onClick={toggleDjActive}
                 style={{
-                  ...btnStyle(system?.listener.running ? '#e74c3c' : '#2ecc71'),
+                  ...btnStyle(status?.dj_active !== false ? '#2ecc71' : '#e74c3c'),
                   flex: 1, fontSize: 14, padding: '8px 12px',
                 }}
               >
-                {system?.listener.running ? 'Stop Listener' : 'Start Listener'}
+                {status?.dj_active !== false ? 'DJ Control' : 'Spotify Control'}
               </button>
             </div>
             <div style={{ display: 'flex', gap: 10, marginTop: 8, fontSize: 12, color: '#666' }}>
@@ -568,9 +583,9 @@ function App() {
                   : 'stopped'}
               </span>
               <span style={{ flex: 1, textAlign: 'center' }}>
-                {system?.listener.running
-                  ? <span style={{ color: '#2ecc71' }}>running (pid {system.listener.pid})</span>
-                  : 'stopped'}
+                {status?.dj_active !== false
+                  ? <span style={{ color: '#2ecc71' }}>DJ picks tracks</span>
+                  : <span style={{ color: '#e74c3c' }}>following Spotify</span>}
               </span>
             </div>
           </Card>

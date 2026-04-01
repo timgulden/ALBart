@@ -10,7 +10,7 @@ import numpy as np
 
 from albart.pipeline.preprocess import load_art_32
 from albart.runtime.display import DisplayBackend
-from albart.runtime.lookup import AliasTable, TrackLookup
+from albart.runtime.lookup import AliasTable, DatabaseTrackLookup
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,7 @@ class DisplayLoop:
     Main display loop — runs on the main thread at display_fps.
 
     Sampling:
-      - Alias table built from full FAISS query (all tracks, weighted by distance)
+      - Alias table built from pgvector query (all tracks, weighted by distance)
       - Each cover is sampled with replacement; same cover may follow itself
       - Dwell time per sample is absolute (exp(-dwell_k * d) * max_dwell, clamped)
 
@@ -48,7 +48,7 @@ class DisplayLoop:
     def __init__(
         self,
         display: DisplayBackend,
-        lookup: TrackLookup,
+        lookup: DatabaseTrackLookup,
         embedding_queue: queue.Queue,
         config: dict,
         map_broadcast=None,
@@ -61,10 +61,13 @@ class DisplayLoop:
         rt = config["runtime"]
         self.fps = rt["display_fps"]
         self.sampling_rank_decay = rt.get("sampling_rank_decay", 0.85)
+        # Room audio offset: shifts floors to account for larger distances
+        # from physical mic input vs digital loopback
+        room_offset = float(rt.get("room_floor_offset", 0.0))
         self.dwell_k = rt["dwell_k"]
-        self.dwell_floor = rt["dwell_floor"]
+        self.dwell_floor = rt["dwell_floor"] + room_offset
         self.brightness_k = rt["brightness_k"]
-        self.brightness_floor = rt["brightness_floor"]
+        self.brightness_floor = rt["brightness_floor"] + room_offset
         self.brightness_power = rt["brightness_power"]
         self.brightness_min = float(rt.get("brightness_min", 0.0))
         self.sampling_top_n = rt["sampling_top_n"]

@@ -23,23 +23,34 @@ runtime:
 
   # Dwell time (absolute, per-track)
   # Calibrated for clean digital signal (BlackHole): d_min_raw ~0.07–0.09 on good matches.
+  # For room audio via mic, distances are ~2.2x larger (floor ~0.18).
   # d=0.079 → ~8s; d=0.10 → ~4.7s; d=0.15 → floors at 1s.
   dwell_k: 25.0         # decay rate above floor; higher = steeper falloff
-  dwell_floor: 0.07     # distances below this get full max_dwell
+  dwell_floor: 0.07     # distances below this get full max_dwell (digital)
   min_dwell_seconds: 1.0
   max_dwell_seconds: 10.0
 
   # Brightness (driven by nearest-neighbor distance)
   # d=0.079 → ~0.71; d=0.10 → ~0.33; d=0.12 → clipped to brightness_min (0.15).
   brightness_k: 25.0         # decay rate above the floor; higher = faster falloff
-  brightness_floor: 0.07    # distances below this are treated as full brightness
+  brightness_floor: 0.07    # distances below this are treated as full brightness (digital)
   brightness_power: 1.5     # power applied after exp; >1 = steep falloff
   brightness_fade_seconds: 1.0
   brightness_min: 0.15       # floor brightness — keeps covers visible even with poor match
 
+  # Room audio offset: added to dwell_floor and brightness_floor when using
+  # a physical mic instead of digital loopback.  Room audio distances are
+  # ~2.2x larger due to reverb, mic coloration, and ambient noise.
+  # Set to 0 for digital (BlackHole) input.
+  room_floor_offset: 0.12   # shifts floor from 0.07 → 0.19 for room audio
+
+  # Audio input device (name substring or index; null = system default)
+  # Common devices: "PDP" (room mic), "MacBook" (built-in), "BlackHole" (loopback)
+  audio_device: "PDP"
+
   # AGC (macOS only — adjusts system input volume to keep RMS near target)
   agc_enabled: true
-  agc_target_rms: 0.20       # target RMS for audio buffer; match recording conditions
+  agc_target_rms: 0.10       # target RMS for audio buffer (0.10 suits room mics; 0.20 for loopback)
   agc_interval_seconds: 10.0 # how often to check and adjust (seconds)
 
   # Display
@@ -48,8 +59,12 @@ runtime:
   display_mode: "sim"   # "sim" or "hub75"
   sim_scale: 22         # pixels per LED in sim mode (22 → 704px window, ~7.5" at 96dpi)
 
-  # Map display broadcast (set to 0 to disable; run_map.py listens on this port)
-  map_broadcast_port: 57001
+  # Map display broadcast from Listener (0 = disabled; DJ handles map broadcast now)
+  # Set to 57001 only if running the Listener *without* the DJ
+  map_broadcast_port: 0
+
+  # DJ broadcast port (RoomEar/Listener → DJ engine)
+  dj_broadcast_port: 57002
 
 neighborhood:
   k: 100                       # nearest neighbors used for PCA basis
@@ -66,3 +81,8 @@ umap:
   n_neighbors: 15       # UMAP neighborhood size — larger = more global structure
   min_dist: 0.1         # minimum distance between points — smaller = tighter clusters
   metric: cosine        # cosine or euclidean (cosine matches CLAP's contrastive objective)
+
+umap_25d:
+  n_neighbors: 75       # aggressive global structure preservation
+  min_dist: 0.3         # looser packing for genre-level clusters
+  model_path: data/umap_25d_model/model.pt  # parametric MLP for real-time projection

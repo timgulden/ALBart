@@ -71,6 +71,14 @@ def main() -> None:
         "--no-voronoi-lines", action="store_true",
         help="Hide Voronoi region borders and labels (umap view only)",
     )
+    parser.add_argument(
+        "--input", choices=["exact", "roomear"], default="exact",
+        help="Input source: exact (from DJ broadcast, default) or roomear (live audio)",
+    )
+    parser.add_argument(
+        "--roomear-port", type=int, default=57002,
+        help="UDP port for RoomEar input (roomear mode only, default: 57002)",
+    )
     args = parser.parse_args()
 
     config = load_config()
@@ -118,10 +126,29 @@ def main() -> None:
         )
 
     # Bind UDP socket (non-blocking)
+    # In roomear mode, listen on the RoomEar port instead of the DJ broadcast port
+    listen_port = args.roomear_port if args.input == "roomear" else args.port
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind(("127.0.0.1", args.port))
+    sock.bind(("127.0.0.1", listen_port))
     sock.setblocking(False)
-    logger.info("Listening for embeddings on UDP port %d", args.port)
+    logger.info(
+        "Listening for embeddings on UDP port %d (input=%s)",
+        listen_port, args.input,
+    )
+
+    # Load UmapProjector for roomear mode (projects 512D → 25D for visualization)
+    projector = None
+    if args.input == "roomear":
+        umap_cfg = config.get("umap_25d", {})
+        model_path = umap_cfg.get("model_path", "data/umap_25d_model/model.pt")
+        from pathlib import Path
+        from albart.utils import DATA_DIR
+        full_path = DATA_DIR.parent / model_path
+        if full_path.exists():
+            from albart.effects.umap_projector import UmapProjector
+            projector = UmapProjector.load(full_path)
+        else:
+            logger.warning("No parametric UMAP model at %s — roomear visualization may be limited", full_path)
 
     fps = float(rt.get("display_fps", 30))
     frame_duration = 1.0 / fps
@@ -143,10 +170,13 @@ def main() -> None:
                     break
 
             if latest is not None:
-                display.update(
-                    latest["raw"],
-                    latest["top1"], latest["d_min_raw"],
-                )
+                raw_emb = latest["raw"]
+                top1 = latest.get("top1")
+                d_min_raw = latest.get("d_min_raw", 0.0)
+                title = latest.get("title")
+                artist = latest.get("artist")
+                display.update(raw_emb, top1, d_min_raw,
+                               title=title, artist=artist)
 
             display.render(frame_duration)
 

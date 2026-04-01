@@ -8,7 +8,7 @@ Startup sequence:
   2. Begin loading CLAP model in a background thread
   3. Show ripple startup animation until model is ready
   4. Fade animation to black
-  5. Start audio capture, FAISS lookup, embedding worker, display loop
+  5. Start audio capture, embedding worker, display loop
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from albart.pipeline.embedder import load_model
 from albart.runtime.agc import AGCWorker
 from albart.runtime.audio import AudioBuffer
 from albart.runtime.embedder import EmbeddingWorker
-from albart.runtime.lookup import TrackLookup
+from albart.runtime.lookup import DatabaseTrackLookup
 from albart.runtime.loop import DisplayLoop
 from albart.runtime.startup import run_startup
 from albart.utils import load_config
@@ -61,10 +61,12 @@ def main() -> None:
                         help="Input audio device name or index (default: system default)")
     args = parser.parse_args()
 
-    device = resolve_device(args.device) if args.device is not None else None
-
     config = load_config()
     rt = config["runtime"]
+
+    # Resolve audio device: CLI arg > config > system default
+    device_name = args.device or rt.get("audio_device")
+    device = resolve_device(device_name) if device_name is not None else None
 
     # --- Display backend (only place these are imported) ---
     display_mode = rt.get("display_mode", "sim")
@@ -148,7 +150,8 @@ def main() -> None:
     # --- Runtime components ---
     embedding_queue: queue.Queue = queue.Queue()
 
-    lookup = TrackLookup()
+    from albart.effects.database import DatabaseClient, DatabaseConfig
+    lookup = DatabaseTrackLookup(DatabaseClient(DatabaseConfig()))
 
     worker = EmbeddingWorker(
         audio_buffer=audio_buffer,

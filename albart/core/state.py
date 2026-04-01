@@ -110,7 +110,8 @@ class DJState(BaseModel, frozen=True):
     song_k: int = 10
     hop_multiplier: float = 5.0
     hop_interval_seconds: float = 1800.0   # 30 min default
-    mode: str = "exact"                    # "exact" or "listen"
+    mode: str = "exact"                    # "exact" or "roomear"
+    dj_active: bool = True                 # False = Spotify Control (passive monitor)
 
     # ── Track history ────────────────────────────────────────────────
     history: tuple[str, ...] = ()          # ordered track IDs
@@ -137,6 +138,9 @@ class DJState(BaseModel, frozen=True):
     # ── Flags ────────────────────────────────────────────────────────
     live_emb_available: bool = False
     stop_requested: bool = False
+
+    # ── Ingestion ────────────────────────────────────────────────────
+    ingesting_tracks: frozenset[str] = frozenset()
 
     # ── Library size (for display / exhaustion check) ────────────────
     total_tracks: int = 0

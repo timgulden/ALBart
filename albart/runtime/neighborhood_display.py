@@ -70,6 +70,19 @@ class NeighborhoodDisplay:
         self._top1_track_id: Optional[str] = None
         self._label_text: str = ""
 
+        # ── Load parametric UMAP projector (512D → 25D) if available ────────
+        self._projector = None
+        from albart.utils import load_config
+        config = load_config()
+        umap_cfg = config.get("umap_25d", {})
+        model_path = umap_cfg.get("model_path", "data/umap_25d_model/model.pt")
+        from pathlib import Path
+        full_path = DATA_DIR.parent / model_path
+        if full_path.exists():
+            from albart.effects.umap_projector import UmapProjector
+            self._projector = UmapProjector.load(full_path)
+            logger.info("Loaded UmapProjector for 512D→25D projection")
+
         # ── Load data from PostgreSQL ──────────────────────────────────────
         logger.info("Loading tracks from PostgreSQL...")
         db = DatabaseClient(config=DatabaseConfig())
@@ -78,7 +91,7 @@ class NeighborhoodDisplay:
             with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
                 cur.execute(
                     "SELECT track_id, title, artist, art_path_32, "
-                    "art_path_original, umap_25d FROM tracks "
+                    "art_path_original, umap_25d, embedding_512 FROM tracks "
                     "WHERE umap_25d IS NOT NULL"
                 )
                 rows = [dict(r) for r in cur.fetchall()]
@@ -111,11 +124,22 @@ class NeighborhoodDisplay:
             all_umap_25d.astype(np.float64) ** 2, axis=1
         )
 
+        # 512D embeddings for room audio neighbor lookup
+        self._all_emb_512: np.ndarray | None = None
+        emb_512_list = [r.get("embedding_512") for r in rows]
+        if all(e is not None for e in emb_512_list):
+            self._all_emb_512 = np.array(emb_512_list, dtype=np.float64)
+            logger.info("Loaded 512D embeddings for room audio lookup")
+        else:
+            n_missing = sum(1 for e in emb_512_list if e is None)
+            logger.warning("%d tracks missing 512D embeddings — room audio lookup disabled", n_missing)
+
         # Track metadata and index lookup
         self._db_rows: dict = {r["track_id"]: r for r in rows}
         self._tid_to_idx: dict[str, int] = {
             tid: i for i, tid in enumerate(self._id_list)
         }
+        self._db = db
 
         # ── Load PIL images (for GL texture upload) ───────────────────────
         logger.info("Pre-loading thumbnail images...")
@@ -162,11 +186,13 @@ class NeighborhoodDisplay:
         self._cx = self._canvas_w / 2.0
         self._cy = self._canvas_h / 2.0
 
+        # Apple SD Gothic Neo covers Latin + CJK (Korean, Japanese, Chinese)
+        _FONT = "applesdgothicneo"
         font_size = max(14, self._canvas_w // 160)
-        self._font = pygame.font.SysFont("Arial", font_size)
+        self._font = pygame.font.SysFont(_FONT, font_size)
         label_size = max(22, self._canvas_w // 80)
-        self._label_font = pygame.font.SysFont("Helvetica", label_size, bold=True)
-        self._label_font_shadow = pygame.font.SysFont("Helvetica", label_size, bold=True)
+        self._label_font = pygame.font.SysFont(_FONT, label_size, bold=True)
+        self._label_font_shadow = pygame.font.SysFont(_FONT, label_size, bold=True)
 
         # ── GL texture caches ─────────────────────────────────────────────
         self._gl_textures: dict[str, int] = {}  # tid → GL texture
@@ -393,20 +419,34 @@ class NeighborhoodDisplay:
             emb: the 512D raw embedding from UDP.  We find the nearest
                  track in 25D and use that as the query position.
         """
-        # Map the incoming 512D embedding to the nearest track's 25D position.
-        # (We can't project arbitrary 512D points into UMAP space, so we
-        # use the top-1 track ID that comes with the UDP payload — but
-        # _compute_positions only receives the embedding.  As a fallback,
-        # find the nearest track by brute-force 25D distance from the
-        # cached query position, or use the weighted centroid.)
+        # Map the incoming embedding to a 25D query position.
         q_25d = np.nan_to_num(emb, nan=0.0, posinf=0.0, neginf=0.0
                               ).astype(np.float64).ravel()
 
-        # If emb is 512D (from UDP), use the cached top-1 track's 25D position
+        # If emb is 512D (from UDP), map to 25D.
+        # In exact mode (top1 is a known track), use its stored 25D position.
+        # In room audio mode (top1 unknown), find nearest tracks in 512D and
+        # use the weighted centroid of their stored 25D positions — this keeps
+        # MapView consistent with what the Listener shows.
         if len(q_25d) != 25:
-            if self._top1_track_id and self._top1_track_id in self._tid_to_idx:
+            is_known = (self._top1_track_id is not None
+                        and self._top1_track_id in self._tid_to_idx)
+            if is_known:
+                # Exact mode: use the known track's stored 25D position
                 idx = self._tid_to_idx[self._top1_track_id]
                 q_25d = self._all_umap_25d[idx].astype(np.float64)
+            elif self._all_emb_512 is not None:
+                # Unknown or room audio: 512D neighbor lookup → weighted 25D centroid
+                # This uses live audio to move toward the right neighborhood
+                emb_f32 = np.nan_to_num(emb, nan=0.0).astype(np.float32).ravel()
+                diffs = self._all_emb_512 - emb_f32.astype(np.float64)
+                dists_sq = np.sum(diffs ** 2, axis=1)
+                k = min(10, self._N)
+                top_k = np.argpartition(dists_sq, k)[:k]
+                top_dists = np.sqrt(dists_sq[top_k])
+                weights = 1.0 / np.maximum(top_dists, 1e-8)
+                weights /= weights.sum()
+                q_25d = (weights[:, None] * self._all_umap_25d[top_k].astype(np.float64)).sum(axis=0)
             elif self._cached_q_25d is not None:
                 q_25d = self._cached_q_25d.astype(np.float64)
             else:
@@ -449,6 +489,86 @@ class NeighborhoodDisplay:
         dirs = rel_3d / np.maximum(r_3d, 1e-8)
         return (dirs * L2_norm[:, None]).astype(np.float32)
 
+    # ── Hot-reload newly ingested tracks ─────────────────────────────────
+
+    def _try_load_new_track(self, track_id: str) -> bool:
+        """Check DB for a newly-ingested track and add it to in-memory arrays.
+
+        Returns True if the track was found and loaded.
+        """
+        import psycopg2.extras
+        with self._db._conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                cur.execute(
+                    "SELECT track_id, title, artist, art_path_32, "
+                    "art_path_original, umap_25d, embedding_512 "
+                    "FROM tracks WHERE track_id = %s AND umap_25d IS NOT NULL",
+                    (track_id,),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    return False
+                row = dict(row)
+
+        logger.info("Hot-loading newly ingested track: %s", track_id)
+
+        # Append to arrays
+        new_idx = self._N
+        self._id_list.append(track_id)
+        self._N += 1
+        self._tid_to_idx[track_id] = new_idx
+        self._db_rows[track_id] = row
+
+        new_25d = np.array(row["umap_25d"], dtype=np.float32).reshape(1, -1)
+        self._all_umap_25d = np.vstack([self._all_umap_25d, new_25d])
+        self._all_norms_sq = np.append(
+            self._all_norms_sq,
+            np.sum(new_25d.astype(np.float64) ** 2),
+        )
+
+        if self._all_emb_512 is not None and row.get("embedding_512") is not None:
+            new_512 = np.array(row["embedding_512"], dtype=np.float64).reshape(1, -1)
+            self._all_emb_512 = np.vstack([self._all_emb_512, new_512])
+
+        # Compute the new track's correct 3D position using the current
+        # PCA basis so it appears in the right place immediately (no drift
+        # from center).
+        new_pos = np.zeros((1, 3), dtype=np.float32)
+        if self._cached_q_25d is not None and self._W is not None:
+            q = self._cached_q_25d.astype(np.float64)
+            t = new_25d.astype(np.float64).ravel()
+            L2_to_q = float(np.linalg.norm(t - q))
+            L2_min = 0.0  # the query itself is at distance 0
+            L2_shifted = max(L2_to_q - L2_min, 0.0)
+            L2_norm = L2_shifted / max(self._L2_median_shift, 1e-8)
+            rel_25d = t - q
+            rel_3d = rel_25d @ self._W
+            r = float(np.linalg.norm(rel_3d))
+            if r > 1e-8:
+                direction = rel_3d / r
+            else:
+                direction = rel_3d
+            new_pos[0] = (direction * L2_norm).astype(np.float32)
+
+        # Extend projection arrays — new track placed at correct position
+        if self._all_proj is not None:
+            self._all_proj = np.vstack([self._all_proj, new_pos])
+        if self._all_proj_smooth is not None:
+            self._all_proj_smooth = np.vstack([self._all_proj_smooth, new_pos])
+
+        # Load thumbnail
+        art_path = row.get("art_path_original") or row.get("art_path_32")
+        if art_path:
+            try:
+                full = DATA_DIR / art_path
+                self._pil_thumbs[track_id] = Image.open(full).convert("RGB")
+            except Exception:
+                self._pil_thumbs[track_id] = None
+        else:
+            self._pil_thumbs[track_id] = None
+
+        return True
+
     # ── Update ────────────────────────────────────────────────────────────
 
     def update(
@@ -456,24 +576,51 @@ class NeighborhoodDisplay:
         emb_raw:       np.ndarray,
         top1_track_id: str,
         d_min_raw:     float,
+        *,
+        title: str | None = None,
+        artist: str | None = None,
     ) -> None:
         self._top1_track_id = top1_track_id
 
-        row = self._db_rows.get(top1_track_id) if top1_track_id else None
-        if row:
-            title  = row["title"]  or ""
-            artist = row["artist"] or ""
+        # If the track isn't in our in-memory data, try hot-loading it
+        # from the database (it may have just been ingested).
+        if (top1_track_id is not None
+                and top1_track_id not in self._tid_to_idx):
+            self._try_load_new_track(top1_track_id)
+
+        # Determine label: use payload title/artist if provided (unknown
+        # tracks get metadata from Spotify API via the engine), then
+        # database, then 512D search for room audio.
+        emb_clean = np.nan_to_num(emb_raw, nan=0.0, posinf=0.0, neginf=0.0)
+
+        if title or artist:
+            # Engine sent metadata (works for unknown tracks being ingested)
             self._label_text = (
-                f"{title}\n{artist}" if (title and artist) else title or artist
+                f"{title}\n{artist}" if (title and artist)
+                else title or artist or ""
             )
-        else:
-            self._label_text = ""
+        elif top1_track_id and top1_track_id in self._tid_to_idx:
+            # Known track in our database
+            row = self._db_rows.get(top1_track_id)
+            t = row["title"] or "" if row else ""
+            a = row["artist"] or "" if row else ""
+            self._label_text = f"{t}\n{a}" if (t and a) else t or a
+        elif top1_track_id is None and self._all_emb_512 is not None:
+            # Room audio: find nearest in 512D for label
+            emb_f32 = emb_clean.astype(np.float64).ravel()
+            if len(emb_f32) == 512:
+                dists_sq = np.sum((self._all_emb_512 - emb_f32) ** 2, axis=1)
+                best_idx = int(np.argmin(dists_sq))
+                d_min_raw = float(np.sqrt(dists_sq[best_idx]))
+                row = self._db_rows.get(self._id_list[best_idx])
+                t = row["title"] or "" if row else ""
+                a = row["artist"] or "" if row else ""
+                self._label_text = f"{t}\n{a}" if (t and a) else t or a
+        # else: keep previous label
 
         d_eff = max(0.0, d_min_raw - self._brightness_floor)
         base = float(np.exp(-self._brightness_k * d_eff))
         self._confidence = base ** self._brightness_power
-
-        emb_clean = np.nan_to_num(emb_raw, nan=0.0, posinf=0.0, neginf=0.0)
 
         now = time.monotonic()
         if not hasattr(self, "_last_update_time"):
@@ -663,19 +810,18 @@ class NeighborhoodDisplay:
         self._ppu = max(200.0, min(5000.0, self._ppu))
 
 
-        # ── Draw tracks + glow frame + label layered at Z=0 ──────────────
-        # Background tracks (z > 0) first, then glow/label, then foreground,
-        # then central cover last (always on top).
+        # ── Draw tracks + glow sphere layered at Z=0 ────────────────────
+        # Background tracks (z > 0) first, then sphere, then foreground,
+        # then central cover, then label text on top of everything.
         self._update_label_texture()
-        glow_drawn = False
+        sphere_drawn = False
         for i in order:
             if i == central_idx:
                 continue  # draw last
-            # Insert glow frame + label at the Z=0 boundary
-            if not glow_drawn and z[i] <= 0:
-                self._draw_label()
+            # Insert glow sphere at the Z=0 boundary
+            if not sphere_drawn and z[i] <= 0:
                 self._draw_sphere()
-                glow_drawn = True
+                sphere_drawn = True
             tid = self._id_list[i]
             tex = self._get_track_texture(tid)
             if tex == 0:
@@ -683,11 +829,10 @@ class NeighborhoodDisplay:
             h = float(tpx[i]) / 2.0
             self._draw_quad(tex, float(sx[i]), float(sy[i]), h, h,
                             float(track_alpha[i]), border=True)
-        if not glow_drawn:
-            self._draw_label()
+        if not sphere_drawn:
             self._draw_sphere()
 
-        # Central cover always drawn last (on top of everything)
+        # Central cover always drawn on top of other covers
         if central_idx in set(vis):
             tid = self._id_list[central_idx]
             tex = self._get_track_texture(tid)
@@ -696,6 +841,9 @@ class NeighborhoodDisplay:
                 self._draw_quad(tex, float(sx[central_idx]),
                                 float(sy[central_idx]), h, h, 1.0,
                                 border=True)
+
+        # Label text drawn last — always visible above all covers
+        self._draw_label()
 
         # ── Tooltip ───────────────────────────────────────────────────────
         self._draw_tooltip()
@@ -841,7 +989,7 @@ class NeighborhoodDisplay:
 
         pil_img = self._pil_thumbs.get(self._hover_track_id)
         if pil_img is not None:
-            resized = pil_img.resize((art_size, art_size), Image.LANCZOS)
+            resized = pil_img.resize((art_size, art_size), Image.LANCZOS).convert("RGBA")
             arr = np.array(resized)
             tip_surf = pygame.image.frombuffer(
                 arr.tobytes(), (art_size, art_size), "RGBA"

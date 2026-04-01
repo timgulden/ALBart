@@ -7,7 +7,7 @@ Only active on macOS (darwin). On other platforms, start() is a no-op.
 
 Tuning:
     target_rms: RMS level that produces good embeddings.  Should match
-        the level used when building the FAISS index (~0.20 for room
+        the level used when building embeddings (~0.20 for room
         recordings through the PDP/Movo mic).
     interval_seconds: how often to check and adjust.  10s is a reasonable
         default — fast enough to adapt to track changes, slow enough to
