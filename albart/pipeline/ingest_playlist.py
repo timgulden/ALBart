@@ -187,7 +187,7 @@ def _tracks_from_file(sp: spotipy.Spotify, path: str) -> list[dict]:
                     pass
             else:
                 logger.debug("Could not fetch %s: %s", tid, e)
-        time.sleep(0.5)  # throttle: ~2 requests/second (conservative)
+        time.sleep(1.0)  # throttle: 1 request/second (very conservative)
 
     if failed:
         logger.warning("%d tracks could not be fetched", failed)
