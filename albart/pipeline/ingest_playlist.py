@@ -37,31 +37,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-SCOPE = (
-    "user-read-playback-state,"
-    "user-modify-playback-state,"
-    "playlist-read-private,"
-    "playlist-read-collaborative,"
-    "user-library-read,"
-    "user-top-read"
-)
-
-
 def _get_client() -> spotipy.Spotify:
-    """Authenticated Spotify client with playlist scope.
-
-    Uses a separate cache file (.cache-ingest) so the broader scope
-    doesn't interfere with the DJ server's token. Will prompt for
-    browser auth on first run.
-    """
+    """Authenticated Spotify client using the DJ server's existing token."""
     return spotipy.Spotify(auth_manager=SpotifyOAuth(
         client_id=os.environ["SPOTIPY_CLIENT_ID"],
         client_secret=os.environ["SPOTIPY_CLIENT_SECRET"],
         redirect_uri=os.environ.get(
             "SPOTIPY_REDIRECT_URI", "http://localhost:8888/callback"
         ),
-        scope=SCOPE,
-        cache_path=".cache-ingest",
+        scope="user-read-playback-state,user-modify-playback-state",
     ))
 
 
@@ -156,7 +140,11 @@ def _parse_track_id(line: str) -> str | None:
 
 
 def _tracks_from_file(sp: spotipy.Spotify, path: str) -> list[dict]:
-    """Read track IDs/URLs from a text file and fetch metadata from Spotify."""
+    """Read track IDs/URLs from a text file and fetch metadata from Spotify.
+
+    Uses individual sp.track() calls with throttling to avoid rate limits.
+    Spotify's batch endpoints (sp.tracks) are restricted for developer apps.
+    """
     track_ids = []
     with open(path) as f:
         for line in f:
@@ -164,29 +152,45 @@ def _tracks_from_file(sp: spotipy.Spotify, path: str) -> list[dict]:
             if tid:
                 track_ids.append(tid)
 
+    # Deduplicate while preserving order
+    seen = set()
+    unique_ids = []
+    for tid in track_ids:
+        if tid not in seen:
+            seen.add(tid)
+            unique_ids.append(tid)
+    track_ids = unique_ids
+
     if not track_ids:
         return []
 
-    logger.info("Fetching metadata for %d tracks...", len(track_ids))
+    logger.info("Fetching metadata for %d tracks (individual lookups)...", len(track_ids))
     tracks = []
-    # Batch fetch: sp.tracks() supports up to 50 at a time
-    for i in range(0, len(track_ids), 50):
-        batch = track_ids[i:i + 50]
+    failed = 0
+    for tid in tqdm(track_ids, desc="Metadata"):
         try:
-            result = sp.tracks(batch)
-            for t in result.get("tracks", []):
-                if t and t.get("id"):
-                    tracks.append(t)
+            t = sp.track(tid)
+            if t and t.get("id"):
+                tracks.append(t)
         except Exception as e:
-            logger.error("Batch fetch failed at offset %d: %s", i, e)
-            # Fall back to individual fetches
-            for tid in batch:
+            failed += 1
+            if "429" in str(e) or "rate" in str(e).lower():
+                # Rate limited — wait and retry once
+                logger.warning("Rate limited, waiting 5s...")
+                time.sleep(5)
                 try:
                     t = sp.track(tid)
                     if t and t.get("id"):
                         tracks.append(t)
+                        failed -= 1
                 except Exception:
-                    logger.warning("Could not fetch track %s", tid)
+                    pass
+            else:
+                logger.debug("Could not fetch %s: %s", tid, e)
+        time.sleep(0.5)  # throttle: ~2 requests/second (conservative)
+
+    if failed:
+        logger.warning("%d tracks could not be fetched", failed)
     return tracks
 
 
