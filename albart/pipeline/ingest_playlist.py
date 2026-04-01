@@ -1,14 +1,18 @@
-"""Ingest a Spotify playlist (or album) into the ALBart database.
+"""Ingest Spotify tracks into the ALBart database.
 
-Downloads previews, computes CLAP embeddings and 25D UMAP projections,
-and stores everything in PostgreSQL.  Idempotent — tracks already in
-the database with embeddings are skipped.
+Accepts a playlist URL, album URL, or a text file with one track
+URL/ID per line.  Downloads previews, computes CLAP embeddings and
+25D UMAP projections, stores everything in PostgreSQL.  Idempotent —
+tracks already in the database with embeddings are skipped.
 
 Usage:
     python3 -m albart.pipeline.ingest_playlist "https://open.spotify.com/playlist/..."
-    python3 -m albart.pipeline.ingest_playlist "spotify:playlist:37i9dQZF1DX5g856aiKiDS"
     python3 -m albart.pipeline.ingest_playlist "https://open.spotify.com/album/..."
-    python3 -m albart.pipeline.ingest_playlist --dry-run "https://open.spotify.com/playlist/..."
+    python3 -m albart.pipeline.ingest_playlist tracks.txt
+    python3 -m albart.pipeline.ingest_playlist --dry-run tracks.txt
+
+Note: Spotify's API may block playlist track access for developer apps.
+If so, export track URLs to a text file (one per line) and pass the file.
 """
 
 from __future__ import annotations
@@ -92,7 +96,8 @@ def _fetch_playlist_tracks(sp: spotipy.Spotify, playlist_id: str) -> list[dict]:
     tracks = []
     offset = 0
     while True:
-        result = sp.playlist_tracks(playlist_id, offset=offset, limit=100)
+        result = sp.playlist_tracks(playlist_id, offset=offset, limit=100,
+                                    market="from_token")
         items = result.get("items", [])
         if not items:
             break
@@ -128,6 +133,60 @@ def _fetch_album_tracks(sp: spotipy.Spotify, album_id: str) -> list[dict]:
         offset += len(items)
         if result.get("next") is None:
             break
+    return tracks
+
+
+def _parse_track_id(line: str) -> str | None:
+    """Extract a Spotify track ID from a URL, URI, or bare ID."""
+    line = line.strip().split("?")[0]
+    if not line or line.startswith("#"):
+        return None
+    # URL: https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC
+    m = re.search(r"open\.spotify\.com/track/([a-zA-Z0-9]+)", line)
+    if m:
+        return m.group(1)
+    # URI: spotify:track:4uLU6hMCjMI75M1A2tKUQC
+    m = re.match(r"spotify:track:([a-zA-Z0-9]+)", line)
+    if m:
+        return m.group(1)
+    # Bare ID (22 chars alphanumeric)
+    if re.match(r"^[a-zA-Z0-9]{22}$", line):
+        return line
+    return None
+
+
+def _tracks_from_file(sp: spotipy.Spotify, path: str) -> list[dict]:
+    """Read track IDs/URLs from a text file and fetch metadata from Spotify."""
+    track_ids = []
+    with open(path) as f:
+        for line in f:
+            tid = _parse_track_id(line)
+            if tid:
+                track_ids.append(tid)
+
+    if not track_ids:
+        return []
+
+    logger.info("Fetching metadata for %d tracks...", len(track_ids))
+    tracks = []
+    # Batch fetch: sp.tracks() supports up to 50 at a time
+    for i in range(0, len(track_ids), 50):
+        batch = track_ids[i:i + 50]
+        try:
+            result = sp.tracks(batch)
+            for t in result.get("tracks", []):
+                if t and t.get("id"):
+                    tracks.append(t)
+        except Exception as e:
+            logger.error("Batch fetch failed at offset %d: %s", i, e)
+            # Fall back to individual fetches
+            for tid in batch:
+                try:
+                    t = sp.track(tid)
+                    if t and t.get("id"):
+                        tracks.append(t)
+                except Exception:
+                    logger.warning("Could not fetch track %s", tid)
     return tracks
 
 
@@ -201,7 +260,8 @@ def main() -> None:
     )
     parser.add_argument(
         "uri", nargs="?", default=None,
-        help="Spotify playlist/album URL or URI",
+        help="Spotify playlist/album URL, URI, or path to a text file "
+             "with one track URL/ID per line",
     )
     parser.add_argument(
         "--workers", type=int, default=4,
@@ -216,29 +276,45 @@ def main() -> None:
     sp = _get_client()
 
     if args.uri is None:
-        parser.error("Provide a Spotify playlist or album URL")
+        parser.error("Provide a Spotify playlist/album URL or text file of track IDs")
 
-    # Parse URI and fetch tracks
-    kind, spotify_id = _parse_uri(args.uri)
-    logger.info("Fetching %s %s...", kind, spotify_id)
+    # Determine input type: file, playlist URL, album URL, or track IDs
+    raw_tracks = []
 
-    try:
-        if kind == "playlist":
-            info = sp.playlist(spotify_id, fields="name,owner.display_name")
-            name = info.get("name", spotify_id)
-            owner = info.get("owner", {}).get("display_name", "")
-            raw_tracks = _fetch_playlist_tracks(sp, spotify_id)
-            logger.info("Playlist: %s (by %s) — %d tracks", name, owner, len(raw_tracks))
-        elif kind == "album":
-            raw_tracks = _fetch_album_tracks(sp, spotify_id)
-            album_name = raw_tracks[0]["album"]["name"] if raw_tracks else spotify_id
-            logger.info("Album: %s — %d tracks", album_name, len(raw_tracks))
-        else:
-            logger.error("Unknown type: %s", kind)
+    if os.path.isfile(args.uri):
+        # Text file with one track URL/ID per line
+        logger.info("Reading track list from %s...", args.uri)
+        raw_tracks = _tracks_from_file(sp, args.uri)
+        logger.info("Loaded %d tracks from file", len(raw_tracks))
+    else:
+        kind, spotify_id = _parse_uri(args.uri)
+        logger.info("Fetching %s %s...", kind, spotify_id)
+        try:
+            if kind == "playlist":
+                info = sp.playlist(spotify_id, fields="name,owner.display_name")
+                name = info.get("name", spotify_id)
+                owner = info.get("owner", {}).get("display_name", "")
+                raw_tracks = _fetch_playlist_tracks(sp, spotify_id)
+                if not raw_tracks:
+                    logger.warning(
+                        "Spotify returned no tracks for playlist '%s'. "
+                        "This is a Spotify API limitation for developer apps. "
+                        "Workaround: play the playlist in Spotify Control mode, "
+                        "or export track URLs to a text file and pass the file path.",
+                        name,
+                    )
+                    sys.exit(1)
+                logger.info("Playlist: %s (by %s) — %d tracks", name, owner, len(raw_tracks))
+            elif kind == "album":
+                raw_tracks = _fetch_album_tracks(sp, spotify_id)
+                album_name = raw_tracks[0]["album"]["name"] if raw_tracks else spotify_id
+                logger.info("Album: %s — %d tracks", album_name, len(raw_tracks))
+            else:
+                logger.error("Unknown type: %s", kind)
+                sys.exit(1)
+        except Exception as e:
+            logger.error("Failed to fetch %s %s: %s", kind, spotify_id, e)
             sys.exit(1)
-    except Exception as e:
-        logger.error("Failed to fetch %s %s: %s", kind, spotify_id, e)
-        sys.exit(1)
 
     # Check which tracks are already in the database
     from albart.effects.database import DatabaseClient, DatabaseConfig
