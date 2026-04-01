@@ -33,11 +33,22 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-def _get_client() -> spotipy.Spotify:
-    """Authenticated Spotify client.
+SCOPE = (
+    "user-read-playback-state,"
+    "user-modify-playback-state,"
+    "playlist-read-private,"
+    "playlist-read-collaborative,"
+    "user-library-read,"
+    "user-top-read"
+)
 
-    Uses the same scope as the DJ server (which the user has already
-    authorized) to avoid re-authentication prompts.
+
+def _get_client() -> spotipy.Spotify:
+    """Authenticated Spotify client with playlist scope.
+
+    Uses a separate cache file (.cache-ingest) so the broader scope
+    doesn't interfere with the DJ server's token. Will prompt for
+    browser auth on first run.
     """
     return spotipy.Spotify(auth_manager=SpotifyOAuth(
         client_id=os.environ["SPOTIPY_CLIENT_ID"],
@@ -45,7 +56,8 @@ def _get_client() -> spotipy.Spotify:
         redirect_uri=os.environ.get(
             "SPOTIPY_REDIRECT_URI", "http://localhost:8888/callback"
         ),
-        scope="user-read-playback-state,user-modify-playback-state",
+        scope=SCOPE,
+        cache_path=".cache-ingest",
     ))
 
 
@@ -53,7 +65,11 @@ def _parse_uri(uri: str) -> tuple[str, str]:
     """Parse a Spotify URI or URL into (type, id).
 
     Returns ("playlist", "abc123") or ("album", "xyz789").
+    Strips query parameters (?si=...) from sharing URLs.
     """
+    # Strip query params
+    uri = uri.split("?")[0]
+
     # URL format: https://open.spotify.com/playlist/37i9dQZF1DX5g856aiKiDS
     url_match = re.search(r"open\.spotify\.com/(playlist|album)/([a-zA-Z0-9]+)", uri)
     if url_match:
