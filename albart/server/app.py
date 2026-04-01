@@ -126,7 +126,7 @@ def get_status() -> StatusResponse:
         return StatusResponse(
             playing=False, song_k=10, set_distance=5.0,
             mood_descriptors=[], mood_threshold=0.35, mood_in_count=0,
-            played_count=0, total_tracks=0, history=[],
+            played_count=0, total_tracks=_get_db().get_total_tracks(), history=[],
         )
 
     state = _engine.get_snapshot()
@@ -433,11 +433,20 @@ def queue_next(track_id: str) -> dict:
 
 # ── Search ───────────────────────────────────────────────────────────
 
+_shared_db: Optional[DatabaseClient] = None
+
+def _get_db() -> DatabaseClient:
+    """Get a DatabaseClient — from the engine if running, otherwise standalone."""
+    global _shared_db
+    if _engine is not None:
+        return _engine.db
+    if _shared_db is None:
+        _shared_db = DatabaseClient(config=DatabaseConfig())
+    return _shared_db
+
 @app.get("/api/search")
 def search_tracks(q: str, limit: int = 10) -> list[TrackInfo]:
-    if _engine is None:
-        return []
-    results = _engine.db.search_tracks(q, limit=limit)
+    results = _get_db().search_tracks(q, limit=limit)
     return [TrackInfo(track_id=r.track_id, title=r.title, artist=r.artist) for r in results]
 
 

@@ -408,23 +408,28 @@ class Engine:
                 })
                 return state
 
-        # Nothing playing — pick a random track
-        import psycopg2.extras
+        # Nothing playing — try to pick a random track, but don't fail
+        # if no Spotify device is available (e.g. after sleep/wake).
+        # The engine loop will keep polling and the user can start
+        # manually from the UI.
         with self._db._conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT track_id FROM tracks WHERE embedding_512 IS NOT NULL "
+                    "SELECT track_id FROM tracks WHERE umap_25d IS NOT NULL "
                     "ORDER BY random() LIMIT 1"
                 )
                 row = cur.fetchone()
                 if row:
                     seed_track_id = row[0]
-                    self._spotify.play_track(seed_track_id)
-                    state = state.model_copy(update={
-                        "played": state.played | {seed_track_id},
-                        "history": (*state.history, seed_track_id),
-                        "last_hop_time": time.monotonic(),
-                    })
+                    success = self._spotify.play_track(seed_track_id)
+                    if success:
+                        state = state.model_copy(update={
+                            "played": state.played | {seed_track_id},
+                            "history": (*state.history, seed_track_id),
+                            "last_hop_time": time.monotonic(),
+                        })
+                    else:
+                        logger.info("No Spotify device available — waiting for user to start")
         return state
 
     # ── Command execution ────────────────────────────────────────────

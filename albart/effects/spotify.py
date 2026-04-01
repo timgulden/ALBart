@@ -68,21 +68,44 @@ class SpotifyClient:
             return PlaybackSnapshot(snapshot_time=time.monotonic())
 
     def play_track(self, track_id: str) -> bool:
-        """Start playing a track.  Returns True on success."""
+        """Start playing a track.  Returns True on success.
+
+        Falls back to the first available device if no active device
+        is found (e.g. after sleep/wake).
+        """
         uri = f"spotify:track:{track_id}"
         try:
             self.sp.start_playback(uris=[uri])
             return True
         except Exception:
-            device = self._get_active_device()
-            if device:
+            pass
+
+        # No active playback — find any available device
+        device = self._get_active_device()
+        if device:
+            try:
+                self.sp.start_playback(uris=[uri], device_id=device)
+                return True
+            except Exception as e:
+                logger.warning("Playback failed on device %s: %s", device, e)
+
+        # Last resort: try to wake the first device by transferring to it
+        try:
+            devices = self.sp.devices()
+            for d in devices.get("devices", []):
                 try:
-                    self.sp.start_playback(uris=[uri], device_id=device)
+                    self.sp.transfer_playback(d["id"], force_play=False)
+                    import time
+                    time.sleep(1)  # give device a moment to wake
+                    self.sp.start_playback(uris=[uri], device_id=d["id"])
+                    logger.info("Woke device '%s' and started playback", d["name"])
                     return True
-                except Exception as e:
-                    logger.error("Playback failed for %s: %s", track_id, e)
-            else:
-                logger.error("No Spotify device available for %s", track_id)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        logger.warning("No Spotify device available for %s", track_id)
         return False
 
     def resume(self) -> bool:
