@@ -985,8 +985,19 @@ function OrbitViewer({ anchors, progress, onClose }: {
         <svg width={size} height={size}>
           {anchors.map((_, i) => {
             const j = (i + 1) % anchors.length
-            const from = positions[i]
-            const to = positions[j]
+            const raw_from = positions[i]
+            const raw_to = positions[j]
+
+            // Inset endpoints so bars don't hide under album covers
+            const inset = 0.05
+            const from = {
+              x: raw_from.x + (raw_to.x - raw_from.x) * inset,
+              y: raw_from.y + (raw_to.y - raw_from.y) * inset,
+            }
+            const to = {
+              x: raw_to.x + (raw_from.x - raw_to.x) * inset,
+              y: raw_to.y + (raw_from.y - raw_to.y) * inset,
+            }
 
             const isActiveSegment = (i === prevIdx && j === curIdx)
             const isCompleted = completedSegments.has(i)
