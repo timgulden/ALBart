@@ -565,6 +565,87 @@ class DatabaseClient:
         )
         return in_mood
 
+    def compute_cluster_mood_mask(
+        self,
+        positive_cluster_ids: list[int],
+        negative_cluster_ids: list[int],
+        centroids: np.ndarray,
+        mean_radii: np.ndarray,
+    ) -> Optional[frozenset[str]]:
+        """Compute the set of track IDs that pass a cluster-based mood filter.
+
+        Positive-first, then negative: a track is included if it's within
+        mean_radius of any positive cluster centroid, then excluded if
+        it's also within mean_radius of any negative cluster centroid.
+
+        Args:
+            positive_cluster_ids: cluster indices to include.
+            negative_cluster_ids: cluster indices to exclude.
+            centroids: (K, 25) array of all cluster centroids.
+            mean_radii: (K,) array of mean radius per cluster.
+
+        Returns:
+            frozenset of track_ids that pass, or None if no clusters selected.
+        """
+        if not positive_cluster_ids and not negative_cluster_ids:
+            return None
+
+        # Fetch all 25D embeddings
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT track_id, umap_25d FROM tracks "
+                    "WHERE umap_25d IS NOT NULL"
+                )
+                rows = cur.fetchall()
+
+        if not rows:
+            return frozenset()
+
+        track_ids = [r[0] for r in rows]
+        embeddings = np.array([r[1] for r in rows], dtype=np.float32)
+
+        # Positive: include tracks within mean_radius of any positive centroid
+        if positive_cluster_ids:
+            pos_centroids = centroids[positive_cluster_ids]
+            pos_radii = mean_radii[positive_cluster_ids]
+            # Distance from each track to each positive centroid
+            # (N, P) matrix
+            pos_dists = np.linalg.norm(
+                embeddings[:, None, :] - pos_centroids[None, :, :], axis=2
+            )
+            # Track passes if nearest positive centroid is within its radius
+            pos_mask = np.any(pos_dists <= pos_radii[None, :], axis=1)
+        else:
+            # No positive filter → all tracks pass
+            pos_mask = np.ones(len(track_ids), dtype=bool)
+
+        # Negative: exclude tracks within mean_radius of any negative centroid
+        if negative_cluster_ids:
+            neg_centroids = centroids[negative_cluster_ids]
+            neg_radii = mean_radii[negative_cluster_ids]
+            neg_dists = np.linalg.norm(
+                embeddings[:, None, :] - neg_centroids[None, :, :], axis=2
+            )
+            neg_mask = np.any(neg_dists <= neg_radii[None, :], axis=1)
+        else:
+            neg_mask = np.zeros(len(track_ids), dtype=bool)
+
+        # Positive first, then subtract negative
+        final_mask = pos_mask & ~neg_mask
+
+        in_mood = frozenset(
+            tid for tid, m in zip(track_ids, final_mask) if m
+        )
+        logger.info(
+            "Cluster mood mask: %d/%d tracks in-mood (%.0f%%) "
+            "[+%d clusters, -%d clusters]",
+            len(in_mood), len(track_ids),
+            100 * len(in_mood) / max(len(track_ids), 1),
+            len(positive_cluster_ids), len(negative_cluster_ids),
+        )
+        return in_mood
+
     # ── Embedding math (transit / long hop) ──────────────────────────
 
     def compute_transit_target(
