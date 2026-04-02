@@ -948,8 +948,12 @@ function OrbitViewer({ anchors, progress, onClose }: {
 
   const [hoverIdx, setHoverIdx] = useState<number | null>(null)
 
-  const phaseLabel = phase === 'dwell'
-    ? `Dwelling (${Math.floor((progress?.dwell_elapsed ?? 0) / 60)}/${Math.floor((progress?.dwell_duration ?? 1800) / 60)}m)`
+  // Show "Transit" until a dwell track has been playing for a bit,
+  // so the last transit track doesn't show as "Dwelling"
+  const dwellElapsed = progress?.dwell_elapsed ?? 0
+  const effectivePhase = (phase === 'dwell' && dwellElapsed < 10) ? 'transit' : phase
+  const phaseLabel = effectivePhase === 'dwell'
+    ? `Dwelling (${Math.floor(dwellElapsed / 60)}/${Math.floor((progress?.dwell_duration ?? 1800) / 60)}m)`
     : `Transit ${(progress?.transit_total ?? 10) - (progress?.transit_remaining ?? 0)}/${progress?.transit_total ?? 10}`
 
   return (
@@ -970,7 +974,7 @@ function OrbitViewer({ anchors, progress, onClose }: {
         }}
       >
         <span style={{ fontSize: 13, color: '#888', fontWeight: 600 }}>
-          Orbit — <span style={{ color: phase === 'transit' ? '#f0c040' : '#2ecc71' }}>{phaseLabel}</span>
+          Orbit — <span style={{ color: effectivePhase === 'transit' ? '#f0c040' : '#2ecc71' }}>{phaseLabel}</span>
         </span>
         <button
           onClick={onClose}
@@ -1039,7 +1043,7 @@ function OrbitViewer({ anchors, progress, onClose }: {
 
         {anchors.map((a, i) => {
           const p = positions[i]
-          const isDwelling = (i === curIdx && phase === 'dwell')
+          const isDwelling = (i === curIdx && effectivePhase === 'dwell')
           return (
             <div
               key={`cover-${i}`}
