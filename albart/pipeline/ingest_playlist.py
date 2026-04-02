@@ -38,15 +38,22 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 def _get_client() -> spotipy.Spotify:
-    """Authenticated Spotify client using the DJ server's existing token."""
-    return spotipy.Spotify(auth_manager=SpotifyOAuth(
-        client_id=os.environ["SPOTIPY_CLIENT_ID"],
-        client_secret=os.environ["SPOTIPY_CLIENT_SECRET"],
-        redirect_uri=os.environ.get(
-            "SPOTIPY_REDIRECT_URI", "http://localhost:8888/callback"
+    """Authenticated Spotify client using the DJ server's existing token.
+
+    Retries disabled so rate-limit handling stays in our control
+    (not spotipy's multi-hour sleep).
+    """
+    return spotipy.Spotify(
+        auth_manager=SpotifyOAuth(
+            client_id=os.environ["SPOTIPY_CLIENT_ID"],
+            client_secret=os.environ["SPOTIPY_CLIENT_SECRET"],
+            redirect_uri=os.environ.get(
+                "SPOTIPY_REDIRECT_URI", "http://localhost:8888/callback"
+            ),
+            scope="user-read-playback-state,user-modify-playback-state",
         ),
-        scope="user-read-playback-state,user-modify-playback-state",
-    ))
+        retries=0,
+    )
 
 
 def _parse_uri(uri: str) -> tuple[str, str]:
@@ -174,17 +181,21 @@ def _tracks_from_file(sp: spotipy.Spotify, path: str) -> list[dict]:
                 tracks.append(t)
         except Exception as e:
             failed += 1
-            if "429" in str(e) or "rate" in str(e).lower():
-                # Rate limited — wait and retry once
-                logger.warning("Rate limited, waiting 5s...")
-                time.sleep(5)
+            err_str = str(e)
+            if "429" in err_str or "rate" in err_str.lower():
+                # Rate limited — back off progressively, then retry
+                logger.warning("Rate limited at track %d/%d. Waiting 30s...",
+                               len(tracks) + failed, len(track_ids))
+                time.sleep(30)
                 try:
                     t = sp.track(tid)
                     if t and t.get("id"):
                         tracks.append(t)
                         failed -= 1
                 except Exception:
-                    pass
+                    logger.error("Still rate limited. Saving progress and exiting.")
+                    logger.error("Re-run the command to continue from where you left off.")
+                    break
             else:
                 logger.debug("Could not fetch %s: %s", tid, e)
         time.sleep(1.0)  # throttle: 1 request/second (very conservative)
