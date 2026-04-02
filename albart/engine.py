@@ -607,17 +607,19 @@ class Engine:
         live_emb: Optional[np.ndarray],
         now: float,
     ) -> DJState:
-        """Compute transit interpolation point and issue neighbor search."""
-        # Use the fixed transit start point (not the wandering current track)
-        # for linear stepping. Fall back to current track if start isn't set.
-        origin_tid = (
-            state.orbit.transit_start_tid
-            if state.orbit and state.orbit.transit_start_tid
-            else cmd.current_track_id
-        )
+        """Compute transit interpolation point and issue neighbor search.
+
+        Interpolates from the CURRENT track (wherever we actually are)
+        toward the target anchor by a fraction proportional to the step.
+        This creates varied paths — each transit finds a different route
+        through the space rather than walking a fixed line.
+        """
+        origin_tid = cmd.current_track_id
         total = state.orbit.transit_total if state.orbit else 10
-        steps_used = total - cmd.transit_remaining + 1
-        fraction = steps_used / total
+        # Fraction of remaining distance to cover in this step.
+        # With N steps remaining, move 1/N of the way to the anchor.
+        # This converges on the anchor regardless of where we wander.
+        fraction = 1.0 / max(cmd.transit_remaining, 1)
         target = self._db.compute_transit_target(
             origin_tid, cmd.target_anchor_track_id, fraction,
         )

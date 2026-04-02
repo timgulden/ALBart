@@ -249,11 +249,16 @@ def _initiate_orbit_pick(
             "pending_hop_type": "ORBIT TRANSIT",
         })
 
-    # ── DWELL: 5D neighbor search around anchor ──────────────────────
+    # ── DWELL: 25D neighbor search around anchor ─────────────────────
+    # Anchor tracks are attractors, not played directly — exclude them
     if orbit.phase == OrbitPhase.DWELL:
+        anchor_ids = frozenset(a.track_id for a in orbit.anchors)
+        dwell_state = state.model_copy(update={
+            "played": state.played | anchor_ids,
+        })
         anchor_tid = orbit.anchors[orbit.current_index].track_id
         query = build_neighbor_query(
-            state,
+            dwell_state,
             target_track_id=anchor_tid,
             space="25d",
             hop_type="orbit_dwell",
