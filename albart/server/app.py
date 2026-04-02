@@ -706,21 +706,27 @@ def interpret_orbit(req: OrbitRequest) -> dict:
 
         # Ask Claude about same-artist runs
         allow_same_artist = False
+        anchors_text = ", ".join(lines[:5])
         try:
             artist_resp = client.messages.create(
                 model="claude-sonnet-4-6",
                 max_tokens=4,
+                system="Answer only Yes or No.",
                 messages=[{
                     "role": "user",
                     "content": (
-                        "A music DJ is about to play a session described as:\n"
-                        f'"{req.description}"\n\n'
-                        "Would it make sense for this session to play multiple "
-                        "tracks in a row by the same artist? Answer Yes or No."
+                        f'A DJ orbit will dwell near these anchor tracks:\n'
+                        f'{anchors_text}\n\n'
+                        f'Journey: "{req.description}"\n\n'
+                        "Should the DJ allow playing multiple tracks by the "
+                        "same artist in a row when dwelling near an anchor? "
+                        "Say Yes if the journey focuses on specific artists "
+                        "or deep dives, No if it emphasizes variety."
                     ),
                 }],
             )
             allow_same_artist = artist_resp.content[0].text.strip().lower().startswith("yes")
+            logger.info("Orbit allow_same_artist: %s", allow_same_artist)
         except Exception:
             pass
 
