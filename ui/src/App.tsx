@@ -363,7 +363,7 @@ function App() {
     } catch {
       setError('Apply orbit failed — is the DJ running?')
     }
-  }, [orbitDescriptions])
+  }, [orbitDescriptions, orbitAllowSameArtist])
 
   const clearOrbit = useCallback(async () => {
     await fetch(`${API}/orbit`, { method: 'DELETE' })
