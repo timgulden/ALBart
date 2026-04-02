@@ -369,6 +369,18 @@ function App() {
     await fetch(`${API}/orbit`, { method: 'DELETE' })
     setOrbitApplied(false)
     setOrbitDescriptions([])
+    setOrbitJourney('')
+  }, [])
+
+  const clearMood = useCallback(async () => {
+    await fetch(`${API}/mood`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ descriptors: [] }),
+    })
+    setMoodApplied(false)
+    setMoodDescriptors([])
+    setMood('')
   }, [])
 
   const playNow = useCallback(async (trackId: string) => {
@@ -668,7 +680,7 @@ function App() {
               >
                 {orbitApplied ? 'Active' : 'Apply Orbit'}
               </button>
-              {status?.orbit_active && (
+              {(status?.orbit_active || orbitApplied) && (
                 <button onClick={clearOrbit} style={btnStyle('#e74c3c')}>
                   Clear
                 </button>
@@ -751,13 +763,19 @@ function App() {
             >
               {moodApplied ? 'Applied ✓' : 'Apply Mood'}
             </button>
-
-            {status && status.mood_in_count > 0 && status.total_tracks > 0 && (
-              <div style={{ fontSize: 13, color: '#888', textAlign: 'center', marginTop: 8 }}>
-                {status.mood_in_count}/{status.total_tracks} tracks in-mood
-                ({Math.round(100 * status.mood_in_count / status.total_tracks)}%)
-              </div>
-            )}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 8 }}>
+              {status && status.mood_in_count > 0 && status.total_tracks > 0 && moodApplied && (
+                <span style={{ fontSize: 13, color: '#888', flex: 1, textAlign: 'center' }}>
+                  {status.mood_in_count}/{status.total_tracks} tracks in-mood
+                  ({Math.round(100 * status.mood_in_count / status.total_tracks)}%)
+                </span>
+              )}
+              {moodApplied && (
+                <button onClick={clearMood} style={{ ...btnStyle('#e74c3c'), fontSize: 13, padding: '4px 12px' }}>
+                  Clear
+                </button>
+              )}
+            </div>
           </Card>
 
           {/* Temperature */}
