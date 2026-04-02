@@ -1105,11 +1105,6 @@ function OrbitViewer({ anchors, progress, onClose }: {
               <div style={{ padding: '6px 8px' }}>
                 <div style={{ fontSize: 12, fontWeight: 600, color: '#eee' }}>{a.title}</div>
                 <div style={{ fontSize: 11, color: '#999', marginTop: 2 }}>{a.artist}</div>
-                {a.description && (
-                  <div style={{ fontSize: 10, color: '#666', marginTop: 4, fontStyle: 'italic' }}>
-                    {a.description}
-                  </div>
-                )}
               </div>
             </div>
           )
