@@ -989,14 +989,17 @@ function OrbitViewer({ anchors, progress, onClose }: {
             const raw_to = positions[j]
 
             // Inset endpoints so bars don't hide under album covers
-            const inset = 0.05
+            const dx = raw_to.x - raw_from.x
+            const dy = raw_to.y - raw_from.y
+            const len = Math.sqrt(dx * dx + dy * dy) || 1
+            const insetPx = coverSize / 2 + 4  // half cover + small gap
             const from = {
-              x: raw_from.x + (raw_to.x - raw_from.x) * inset,
-              y: raw_from.y + (raw_to.y - raw_from.y) * inset,
+              x: raw_from.x + (dx / len) * insetPx,
+              y: raw_from.y + (dy / len) * insetPx,
             }
             const to = {
-              x: raw_to.x + (raw_from.x - raw_to.x) * inset,
-              y: raw_to.y + (raw_from.y - raw_to.y) * inset,
+              x: raw_to.x - (dx / len) * insetPx,
+              y: raw_to.y - (dy / len) * insetPx,
             }
 
             const isActiveSegment = (i === prevIdx && j === curIdx)
