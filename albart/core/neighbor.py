@@ -42,11 +42,10 @@ def build_neighbor_query(
     in_orbit = state.orbit is not None
     allow_same = in_orbit and state.orbit.allow_same_artist
 
-    # Orbit modes get stronger artist penalty
-    if in_orbit and not allow_same:
-        penalty = 0.01
-    else:
-        penalty = 0.1
+    # Same artist penalty: light enough to allow repeats when
+    # the neighborhood is dominated by one artist (e.g. orbit
+    # dwell on Ray Charles), but enough to add variety
+    penalty = 0.1
 
     return FindNeighborsCommand(
         target_track_id=target_track_id,
