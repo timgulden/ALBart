@@ -1,7 +1,8 @@
 """Spotify playback effects — isolated side-effect wrapper around spotipy.
 
-All Spotify API calls go through this client.  The engine calls these
-methods; pure logic never touches the Spotify API.
+Implements the PlaybackClient and MetadataClient protocols defined in
+``albart.effects.playback``.  The engine and server interact with Spotify
+exclusively through these interfaces.
 """
 
 from __future__ import annotations
@@ -154,6 +155,20 @@ class SpotifyClient:
         except Exception as e:
             logger.warning("Transfer failed: %s", e)
             return False
+
+    def get_track_metadata(self, track_id: str) -> Optional[tuple[str, str]]:
+        """Look up (title, artist) for a Spotify track ID.
+
+        Implements MetadataClient protocol.
+        """
+        try:
+            item = self.sp.track(track_id)
+            title = item.get("name")
+            artists = item.get("artists", [])
+            artist = ", ".join(a["name"] for a in artists) if artists else None
+            return (title, artist)
+        except Exception:
+            return None
 
     def _get_active_device(self) -> Optional[str]:
         """Find an active Spotify device."""

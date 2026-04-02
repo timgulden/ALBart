@@ -87,7 +87,7 @@ def main() -> None:
 
     engine = Engine(
         db=db,
-        spotify=spotify,
+        playback=spotify,
         broadcast=broadcast,
         udp_listener=udp,
         mode=args.mode,

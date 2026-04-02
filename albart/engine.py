@@ -47,7 +47,7 @@ from albart.core.orbit_logic import check_arrival, transit_done
 from albart.core.state import DJState, PlaybackSnapshot
 from albart.effects.broadcast import BroadcastClient
 from albart.effects.database import DatabaseClient
-from albart.effects.spotify import SpotifyClient
+from albart.effects.playback import MetadataClient, PlaybackClient
 from albart.effects.udp_listener import UDPListener
 from albart.utils import DATA_DIR
 
@@ -68,7 +68,7 @@ class Engine:
     def __init__(
         self,
         db: DatabaseClient,
-        spotify: SpotifyClient,
+        playback: PlaybackClient,
         broadcast: BroadcastClient,
         udp_listener: UDPListener,
         *,
@@ -80,7 +80,7 @@ class Engine:
         norm_target: float = 0.12,
     ) -> None:
         self._db = db
-        self._spotify = spotify
+        self._playback = playback
         self._broadcast = broadcast
         self._udp = udp_listener
         self._projector = projector
@@ -162,7 +162,7 @@ class Engine:
                 "next_pick": None,
                 "monitored_track": None,
             })
-            success = self._spotify.play_track(next_tid)
+            success = self._playback.play_track(next_tid)
             if not success:
                 return None
             result = on_track_played(state, next_tid, now)
@@ -215,7 +215,7 @@ class Engine:
             return None
 
         # Play immediately
-        success = self._spotify.play_track(next_tid)
+        success = self._playback.play_track(next_tid)
         if not success:
             return None
 
@@ -304,7 +304,7 @@ class Engine:
         if next_tid is None:
             return None
 
-        success = self._spotify.play_track(next_tid)
+        success = self._playback.play_track(next_tid)
         if not success:
             return None
 
@@ -327,9 +327,9 @@ class Engine:
         return self._db
 
     @property
-    def spotify(self) -> SpotifyClient:
-        """Expose Spotify client for server-initiated actions."""
-        return self._spotify
+    def playback(self) -> PlaybackClient:
+        """Expose playback client for server-initiated actions."""
+        return self._playback
 
     # ── Main loop ────────────────────────────────────────────────────
 
@@ -360,7 +360,7 @@ class Engine:
                 state = self._drain_actions(state)
 
                 # Gather external inputs
-                playback = self._spotify.poll_playback()
+                playback = self._playback.poll_playback()
                 live_emb, _ = self._udp.get_latest()
                 override = self._check_override(state)
                 now = time.monotonic()
@@ -408,7 +408,7 @@ class Engine:
         """Initialize the first track."""
         if seed_track_id is None:
             # Check what Spotify is currently playing
-            pb = self._spotify.poll_playback()
+            pb = self._playback.poll_playback()
             if pb.current_track_id and pb.is_playing:
                 seed_track_id = pb.current_track_id
 
@@ -447,7 +447,7 @@ class Engine:
                 row = cur.fetchone()
                 if row:
                     seed_track_id = row[0]
-                    success = self._spotify.play_track(seed_track_id)
+                    success = self._playback.play_track(seed_track_id)
                     if success:
                         state = state.model_copy(update={
                             "played": state.played | {seed_track_id},
@@ -470,7 +470,7 @@ class Engine:
         """Execute commands and feed results back into logic."""
         for cmd in commands:
             if isinstance(cmd, PlayTrackCommand):
-                success = self._spotify.play_track(cmd.track_id)
+                success = self._playback.play_track(cmd.track_id)
                 if success:
                     result = on_track_played(state, cmd.track_id, now)
                     state = result.state
@@ -536,7 +536,7 @@ class Engine:
                                         )
 
             elif isinstance(cmd, ResumePlaybackCommand):
-                self._spotify.resume()
+                self._playback.resume()
                 logger.info("Resumed paused playback")
 
             elif isinstance(cmd, ComputeMoodMaskCommand):
@@ -789,10 +789,17 @@ class Engine:
         from albart.effects.ingest import ingest_track
 
         clap_model, clap_processor, clap_device = self._get_clap_model()
+        # Pass the raw Spotify client for ingestion (needs sp.track() for
+        # metadata + preview URL).  Non-Spotify backends would implement
+        # their own ingestion pipeline.
+        sp = getattr(self._playback, "sp", None)
+        if sp is None:
+            logger.warning("Ingestion not supported for this playback backend")
+            return state
         future = self._ingestion_executor.submit(
             ingest_track,
             track_id,
-            self._spotify.sp,
+            sp,
             self._db,
             self._projector,
             clap_model,
@@ -866,17 +873,13 @@ class Engine:
             result = (track.title, track.artist)
             self._display_cache[track_id] = result
             return result
-        # Try Spotify API (for unknown tracks being ingested)
-        try:
-            item = self._spotify.sp.track(track_id)
-            title = item.get("name")
-            artists = item.get("artists", [])
-            artist = ", ".join(a["name"] for a in artists) if artists else None
-            result = (title, artist)
-            self._display_cache[track_id] = result
-            return result
-        except Exception:
-            return None, None
+        # Try playback client's metadata lookup (if supported)
+        if hasattr(self._playback, "get_track_metadata"):
+            meta = self._playback.get_track_metadata(track_id)
+            if meta is not None:
+                self._display_cache[track_id] = meta
+                return meta
+        return None, None
 
     def _check_override(self, state: DJState) -> Optional[str]:
         """Check for map click override file."""

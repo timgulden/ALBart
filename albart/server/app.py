@@ -232,7 +232,7 @@ def start_session(req: StartRequest) -> dict:
 
         _engine = Engine(
             db=db,
-            spotify=spotify,
+            playback=spotify,
             broadcast=broadcast,
             udp_listener=udp,
             mode=req.mode,
@@ -276,7 +276,7 @@ def stop_session() -> dict:
     global _engine, _engine_thread
     if _engine is not None:
         _engine.request_stop()
-        _engine.spotify.pause()
+        _engine.playback.pause()
     _engine = None
     _engine_thread = None
     return {"status": "stopped"}
@@ -421,7 +421,7 @@ def apply_mood(req: DescriptorsUpdate) -> dict:
 def seek_track(req: SeekRequest) -> dict:
     if _engine is None:
         return {"error": "No active session"}
-    _engine.spotify.seek(req.position_ms)
+    _engine.playback.seek(req.position_ms)
     return {"position_ms": req.position_ms}
 
 
@@ -464,7 +464,7 @@ def play_now(track_id: str) -> dict:
         return result.state
 
     _engine.enqueue_action(_override)
-    _engine.spotify.play_track(track_id)
+    _engine.playback.play_track(track_id)
     track = _engine.db.get_track(track_id)
     name = f"{track.title} — {track.artist}" if track else track_id
     return {"status": "playing", "track": name}
@@ -516,7 +516,11 @@ def search_tracks(q: str, limit: int = 10) -> list[TrackInfo]:
 def get_devices() -> list[DeviceInfo]:
     if _engine is None:
         return []
-    devices = _engine.spotify.get_devices()
+    # Device listing is player-specific (Spotify has multiple devices)
+    pb = _engine.playback
+    if not hasattr(pb, "get_devices"):
+        return []
+    devices = pb.get_devices()
     return [
         DeviceInfo(
             id=d["id"], name=d["name"], type=d["type"],
@@ -531,7 +535,7 @@ def get_devices() -> list[DeviceInfo]:
 def set_volume(req: VolumeUpdate) -> dict:
     if _engine is None:
         return {"error": "No active session"}
-    _engine.spotify.set_volume(req.volume)
+    _engine.playback.set_volume(req.volume)
     return {"volume": req.volume}
 
 
@@ -539,7 +543,10 @@ def set_volume(req: VolumeUpdate) -> dict:
 def set_device(device_id: str) -> dict:
     if _engine is None:
         return {"error": "No active session"}
-    _engine.spotify.transfer_playback(device_id)
+    pb = _engine.playback
+    if not hasattr(pb, "transfer_playback"):
+        return {"error": "Device transfer not supported by this player"}
+    pb.transfer_playback(device_id)
     return {"status": "transferred", "device": device_id}
 
 
@@ -817,7 +824,7 @@ def auto_start() -> None:
         udp = UDPListener()
 
         _engine = Engine(
-            db=db, spotify=spotify, broadcast=broadcast,
+            db=db, playback=spotify, broadcast=broadcast,
             udp_listener=udp, mode="exact", song_k=10,
             projector=_load_projector(),
             norm_target=_get_norm_target(),
