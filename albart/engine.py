@@ -613,16 +613,16 @@ class Engine:
         """Compute transit interpolation point and issue neighbor search.
 
         Interpolates from the CURRENT track (wherever we actually are)
-        toward the target anchor by a fraction proportional to the step.
-        This creates varied paths — each transit finds a different route
-        through the space rather than walking a fixed line.
+        toward the target anchor.  The fraction is step/total of the
+        distance from the current track to the anchor — step 10/10
+        targets the anchor exactly.  Because we interpolate from the
+        current track (not a fixed origin), different tracks get
+        picked each transit, creating varied paths.
         """
         origin_tid = cmd.current_track_id
         total = state.orbit.transit_total if state.orbit else 10
-        # Fraction of remaining distance to cover in this step.
-        # With N steps remaining, move 1/N of the way to the anchor.
-        # This converges on the anchor regardless of where we wander.
-        fraction = 1.0 / max(cmd.transit_remaining, 1)
+        steps_used = total - cmd.transit_remaining + 1
+        fraction = steps_used / total
         target = self._db.compute_transit_target(
             origin_tid, cmd.target_anchor_track_id, fraction,
         )
