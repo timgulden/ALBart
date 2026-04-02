@@ -302,9 +302,13 @@ def on_neighbors_found(
     """
     in_orbit = state.orbit is not None
     allow_same = in_orbit and state.orbit.allow_same_artist
-    penalty = 0.01 if in_orbit and not allow_same else 0.1
+    penalty = 0.1
 
-    recent = get_recent_artists(state.history, track_artists)
+    # Look back further in orbit mode — with dense artist clusters
+    # (e.g. 42 Screaming Trees in grunge), a 3-track lookback resets
+    # too quickly and the same artist dominates
+    lookback = 8 if in_orbit else 3
+    recent = get_recent_artists(state.history, track_artists, n=lookback)
 
     next_tid = select_from_candidates(
         candidates,

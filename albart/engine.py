@@ -588,9 +588,11 @@ class Engine:
             target, cmd.k, cmd.exclude_played, mood_ids,
         )
 
-        # Get artist info for penalty
+        # Get artist info for penalty — include recent history tracks
+        # so the penalty can look back further than just the candidates
         cand_ids = [c[0] for c in candidates]
-        track_artists = self._db.get_artists_for_tracks(cand_ids)
+        recent_ids = list(state.history[-8:])
+        track_artists = self._db.get_artists_for_tracks(cand_ids + recent_ids)
 
         # Feed back to logic
         result = on_neighbors_found(
@@ -658,7 +660,9 @@ class Engine:
         if not candidates:
             return state
 
-        track_artists = self._db.get_artists_for_tracks([c[0] for c in candidates])
+        cand_ids_t = [c[0] for c in candidates]
+        recent_ids_t = list(state.history[-8:])
+        track_artists = self._db.get_artists_for_tracks(cand_ids_t + recent_ids_t)
         result = on_neighbors_found(
             state, candidates, track_artists, "orbit_transit", now, self._rng,
         )
