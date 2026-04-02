@@ -109,7 +109,9 @@ def on_poll_tick(
         return LogicResult(state=state, commands=commands)
 
     # ── Manual track change detection ────────────────────────────────
-    if current != last_tid and state.next_pick is None:
+    # Also skip if current is already at the end of history (e.g. skip()
+    # already added it from the server thread before the poll ran)
+    if current != last_tid and state.next_pick is None and current not in state.history[-2:]:
         # User changed the track in Spotify — follow along.
         # Allow re-playing tracks already in history (e.g. user switches
         # back to a just-ingested track).
