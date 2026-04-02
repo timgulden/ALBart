@@ -129,6 +129,17 @@ function App() {
           if (active && systemRes.ok) {
             setSystem(await systemRes.json())
           }
+          // Sync local mood/orbit state with server
+          // (clears UI indicators after a server restart)
+          if (active && statusRes.ok) {
+            if (data.mood_descriptors.length === 0) {
+              setMoodApplied(false)
+              setMoodDescriptors([])
+            }
+            if (!data.orbit_active) {
+              setOrbitApplied(false)
+            }
+          }
         } catch { /* server not running */ }
         await new Promise(r => setTimeout(r, 2000))
       }
