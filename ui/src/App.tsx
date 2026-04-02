@@ -125,13 +125,14 @@ function App() {
                 setVolume(data.volume)
               }
             }
-            // Sync local mood/orbit state with server
-            // (clears UI indicators after a server restart)
-            if (data.mood_descriptors.length === 0) {
+            // Sync local mood/orbit "applied" flags with server
+            // (clears UI indicators after a server restart, but only
+            // if the user had previously applied — don't wipe descriptors
+            // the user is still reviewing)
+            if (data.mood_descriptors.length === 0 && moodApplied) {
               setMoodApplied(false)
-              setMoodDescriptors([])
             }
-            if (!data.orbit_active) {
+            if (!data.orbit_active && orbitApplied) {
               setOrbitApplied(false)
             }
           }
