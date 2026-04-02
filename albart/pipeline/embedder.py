@@ -107,18 +107,27 @@ def embed_track(
         L2-normalized (512,) float32 embedding, or None if too short.
     """
     chunk_samples = chunk_seconds * SAMPLE_RATE
-    n_chunks = len(audio) // chunk_samples
+    min_chunk = int(chunk_samples * 0.9)  # pad chunks that are ≥90% full
 
-    if n_chunks < 1:
-        return None  # track shorter than one chunk
+    if len(audio) < min_chunk:
+        return None  # track shorter than one usable chunk
 
     chunk_embs = []
-    for i in range(n_chunks):
-        start = i * chunk_samples
-        chunk = audio[start:start + chunk_samples]
+    offset = 0
+    while offset < len(audio):
+        remaining = len(audio) - offset
+        if remaining < min_chunk:
+            break  # discard final fragment under 90% of chunk size
+        chunk = audio[offset:offset + chunk_samples]
+        if len(chunk) < chunk_samples:
+            chunk = np.pad(chunk, (0, chunk_samples - len(chunk)))
         chunk_embs.append(
             embed_audio(chunk, model, processor, device, norm_target=norm_target)
         )
+        offset += chunk_samples
+
+    if not chunk_embs:
+        return None
 
     avg = np.mean(chunk_embs, axis=0).astype(np.float32)
     return (avg / (np.linalg.norm(avg) + 1e-8)).astype(np.float32)
