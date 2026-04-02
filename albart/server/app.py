@@ -175,20 +175,12 @@ def get_status() -> StatusResponse:
                 art_url=f"/api/art/{a.track_id}",
                 active=(i == state.orbit.current_index),
             ))
-        # Compute transit segment progress from 25D distances
+        # Transit progress from step counter (smooth and predictable)
         seg_progress = 0.0
         orbit = state.orbit
-        if orbit.phase.value == "transit" and orbit.last_played_tid:
-            last_emb = db.get_embedding_25d(orbit.last_played_tid)
-            target_emb = db.get_embedding_25d(orbit.anchors[orbit.current_index].track_id)
-            if last_emb is not None and target_emb is not None and orbit.transit_initial_dist > 1e-8:
-                import numpy as np
-                dist_remaining = float(np.linalg.norm(
-                    target_emb.astype(np.float64) - last_emb.astype(np.float64)
-                ))
-                seg_progress = max(0.0, min(1.0,
-                    1.0 - dist_remaining / orbit.transit_initial_dist
-                ))
+        if orbit.phase.value == "transit" and orbit.transit_total > 0:
+            steps_used = orbit.transit_total - max(orbit.transit_remaining, 0)
+            seg_progress = min(1.0, steps_used / orbit.transit_total)
         prog = get_progress(state.orbit, time.monotonic(), segment_progress=seg_progress)
         orbit_progress = OrbitProgress(**prog)
 
