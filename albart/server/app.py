@@ -360,40 +360,85 @@ def set_dj_active(req: dict) -> dict:
 
 @app.post("/api/interpret")
 def interpret_mood(req: MoodUpdate) -> dict:
-    """Call Claude to expand mood text into descriptors."""
+    """Map mood text to cluster include/exclude using Claude.
+
+    If clusters.json exists, Claude selects from the actual cluster labels.
+    The returned descriptors are the selected labels (prefixed with NOT:
+    for exclusions), which the user can review and edit before applying.
+    """
     import anthropic
+    import json
+
+    clusters_path = DATA_DIR / "clusters.json"
 
     try:
         client = anthropic.Anthropic()
-        response = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=1024,
-            messages=[{
-                "role": "user",
-                "content": (
-                    "I'm setting up a music DJ that should play tracks matching "
-                    "a specific mood. Given this description:\n\n"
-                    f'"{req.mood}"\n\n'
-                    "Generate exactly 20 short music genre/mood descriptors "
-                    "(2-5 words each) that define what kind of music should play. "
-                    "Include both positive descriptors (what TO play) and avoid "
-                    "descriptors prefixed with 'NOT:' for what to avoid.\n\n"
-                    "Return ONLY the list, one per line, no numbering."
-                ),
-            }],
-        )
-        lines = [
-            ln.strip() for ln in response.content[0].text.strip().split("\n")
-            if ln.strip()
-        ]
 
-        # Pre-warm CLAP embedder
-        positive, _ = parse_mood_descriptors(lines)
-        if positive:
-            from albart.text_embedder import embed_texts
-            embed_texts(positive[:1])
+        if clusters_path.exists():
+            data = json.loads(clusters_path.read_text())
+            labels = data["labels"]
 
-        return {"descriptors": lines, "mood": req.mood}
+            labels_text = "\n".join(f"{i}: {label}" for i, label in enumerate(labels))
+
+            response = client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=1024,
+                system="You are a JSON API. Return only valid JSON, no commentary.",
+                messages=[{
+                    "role": "user",
+                    "content": (
+                        f"Music mood: \"{req.mood}\"\n\n"
+                        f"Clusters:\n{labels_text}\n\n"
+                        "Which clusters to include and exclude? "
+                        "Be selective — only include clusters that clearly fit. "
+                        "Exclude clusters that clearly conflict. "
+                        "Leave ambiguous clusters out of both lists.\n\n"
+                        '{"include": [...], "exclude": [...]}'
+                    ),
+                }],
+            )
+
+            text = response.content[0].text.strip()
+            if text.startswith("```"):
+                text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+            result = json.loads(text)
+
+            # Convert to descriptor lines for the UI (user can review/edit)
+            lines = []
+            for i in result.get("include", []):
+                if i < len(labels):
+                    lines.append(labels[i])
+            for i in result.get("exclude", []):
+                if i < len(labels):
+                    lines.append(f"NOT: {labels[i]}")
+
+            return {"descriptors": lines, "mood": req.mood}
+
+        else:
+            # Fallback: legacy CLAP-style descriptor generation
+            response = client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=1024,
+                messages=[{
+                    "role": "user",
+                    "content": (
+                        "I'm setting up a music DJ that should play tracks matching "
+                        "a specific mood. Given this description:\n\n"
+                        f'"{req.mood}"\n\n'
+                        "Generate exactly 20 short music genre/mood descriptors "
+                        "(2-5 words each) that define what kind of music should play. "
+                        "Include both positive descriptors (what TO play) and avoid "
+                        "descriptors prefixed with 'NOT:' for what to avoid.\n\n"
+                        "Return ONLY the list, one per line, no numbering."
+                    ),
+                }],
+            )
+            lines = [
+                ln.strip() for ln in response.content[0].text.strip().split("\n")
+                if ln.strip()
+            ]
+            return {"descriptors": lines, "mood": req.mood}
+
     except Exception as e:
         return {"error": str(e)}
 

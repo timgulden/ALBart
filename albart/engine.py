@@ -692,12 +692,12 @@ class Engine:
         return self._execute_commands(state, [query], live_emb, now)
 
     def _execute_mood_mask(self, cmd: ComputeMoodMaskCommand) -> None:
-        """Compute and cache the mood mask using cluster-based filtering.
+        """Compute and cache the mood mask.
 
-        Loads cluster data (centroids, labels, radii) from clusters.json,
-        then asks Claude to pick which clusters match the mood descriptors.
-        Falls back to the legacy CLAP text embedding approach if clusters
-        are not available.
+        Descriptors are cluster labels (from the interpret step).
+        Positive labels are included, NOT:-prefixed labels are excluded.
+        Matches labels to cluster IDs and computes the distance-based mask.
+        Falls back to CLAP text embeddings if clusters.json is missing.
         """
         if not cmd.descriptors:
             self._mood_mask = None
@@ -707,16 +707,36 @@ class Engine:
         from albart.core.mood import parse_mood_descriptors
         positive, negative = parse_mood_descriptors(list(cmd.descriptors))
 
-        # Try cluster-based filtering first
+        # Try cluster-based filtering
         clusters_path = DATA_DIR / "clusters.json"
         if clusters_path.exists():
-            self._mood_mask = self._compute_cluster_mood(
-                positive, negative, clusters_path,
-            )
-            return
+            import json
+            data = json.loads(clusters_path.read_text())
+            labels = data["labels"]
+            centroids = np.array(data["centroids"], dtype=np.float32)
+            mean_radii = np.array(data["mean_radii"], dtype=np.float32)
+
+            # Match descriptor strings to cluster IDs
+            label_to_id = {label.lower(): i for i, label in enumerate(labels)}
+            pos_ids = [label_to_id[d.lower()] for d in positive if d.lower() in label_to_id]
+            neg_ids = [label_to_id[d.lower()] for d in negative if d.lower() in label_to_id]
+
+            if pos_ids or neg_ids:
+                pos_labels = [labels[i] for i in pos_ids]
+                neg_labels = [labels[i] for i in neg_ids]
+                logger.info(
+                    "Cluster mood: +[%s] -[%s]",
+                    ", ".join(pos_labels), ", ".join(neg_labels),
+                )
+                self._mood_mask = self._db.compute_cluster_mood_mask(
+                    pos_ids, neg_ids, centroids, mean_radii,
+                )
+                return
+            else:
+                logger.warning("No descriptors matched cluster labels")
 
         # Fallback: legacy CLAP text embedding approach
-        logger.info("No clusters.json — falling back to CLAP text mood filter")
+        logger.info("Falling back to CLAP text mood filter")
         pos_embs = None
         neg_embs = None
         if positive or negative:
@@ -727,75 +747,6 @@ class Engine:
                 neg_embs = embed_texts(negative)
 
         self._mood_mask = self._db.compute_mood_mask(pos_embs, neg_embs, cmd.threshold)
-
-    def _compute_cluster_mood(
-        self,
-        positive_descriptors: list[str],
-        negative_descriptors: list[str],
-        clusters_path,
-    ) -> frozenset[str] | None:
-        """Use clusters + Claude to build the mood mask."""
-        import json
-
-        data = json.loads(clusters_path.read_text())
-        labels = data["labels"]
-        centroids = np.array(data["centroids"], dtype=np.float32)
-        mean_radii = np.array(data["mean_radii"], dtype=np.float32)
-
-        # Ask Claude which clusters match the mood
-        import anthropic
-
-        labels_text = "\n".join(
-            f"  {i}: {label}" for i, label in enumerate(labels)
-        )
-        pos_text = ", ".join(positive_descriptors) if positive_descriptors else "(none)"
-        neg_text = ", ".join(negative_descriptors) if negative_descriptors else "(none)"
-
-        prompt = (
-            "I have a music library organized into genre clusters. "
-            "Given a mood description, select which clusters to INCLUDE "
-            "and which to EXCLUDE.\n\n"
-            f"Mood — include: {pos_text}\n"
-            f"Mood — exclude: {neg_text}\n\n"
-            f"Available clusters:\n{labels_text}\n\n"
-            "Return ONLY a JSON object with two keys:\n"
-            '  "include": [list of cluster numbers to include]\n'
-            '  "exclude": [list of cluster numbers to exclude]\n\n'
-            "Clusters not mentioned in either list are neither included "
-            "nor excluded. Be generous with includes — when in doubt, "
-            "include rather than exclude. Only exclude clusters that "
-            "clearly conflict with the mood."
-        )
-
-        try:
-            client = anthropic.Anthropic()
-            response = client.messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=1024,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            text = response.content[0].text.strip()
-            # Strip markdown fences if present
-            if text.startswith("```"):
-                text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-            result = json.loads(text)
-
-            pos_ids = [int(i) for i in result.get("include", [])]
-            neg_ids = [int(i) for i in result.get("exclude", [])]
-
-            pos_labels = [labels[i] for i in pos_ids if i < len(labels)]
-            neg_labels = [labels[i] for i in neg_ids if i < len(labels)]
-            logger.info(
-                "Cluster mood: +[%s] -[%s]",
-                ", ".join(pos_labels), ", ".join(neg_labels),
-            )
-
-            return self._db.compute_cluster_mood_mask(
-                pos_ids, neg_ids, centroids, mean_radii,
-            )
-        except Exception as e:
-            logger.error("Cluster mood failed: %s — falling back to no filter", e)
-            return None
 
     def _patch_transit_distance(self, state: DJState) -> DJState:
         """If orbit just entered transit with placeholder distance, compute the real one."""
