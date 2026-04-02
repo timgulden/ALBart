@@ -50,8 +50,9 @@ def select_from_candidates(
     tids = [c[0] for c in pool]
     dists = np.array([c[1] for c in pool], dtype=np.float64)
 
-    # Inverse-distance weighting
-    weights = 1.0 / np.maximum(dists, 1e-8)
+    # Inverse-cube-distance weighting — strongly favors nearest tracks
+    # while keeping the full pool for occasional variety
+    weights = 1.0 / np.maximum(dists, 1e-8) ** 3
 
     # Artist penalty
     if not allow_same_artist:
