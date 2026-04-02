@@ -224,14 +224,12 @@ def _initiate_orbit_pick(
     last_tid = state.history[-1]
     commands: list[Command] = list(pending_commands)
 
-    # ── Check transit arrival → dwell transition ──────────────────────
+    # ── Check transit arrival → queue dwell transition ─────────────────
     # The engine marks arrived=True when the last transit track starts.
-    # We delay the actual phase change to here — when the arriving track
-    # is ending and we're about to pick the first dwell track.
+    # We set pending_hop_type here so on_track_played will do the actual
+    # phase transition when the first dwell track starts playing.
     if orbit.phase == OrbitPhase.TRANSIT and orbit.arrived:
-        orbit = start_dwell(orbit, now)
         state = state.model_copy(update={
-            "orbit": orbit,
             "pending_hop_type": "ORBIT DWELL",
         })
 
@@ -373,6 +371,12 @@ def on_track_played(
     if new_orbit is not None and state.orbit_picked:
         new_orbit = record_played(new_orbit, track_id)
         commands.append(UpdateOrbitPositionCommand(track_id=track_id))
+
+    # Transition to dwell at the exact moment the first dwell track plays
+    if (new_orbit is not None
+            and new_orbit.phase == OrbitPhase.TRANSIT
+            and hop_label == "ORBIT DWELL"):
+        new_orbit = start_dwell(new_orbit, now)
 
     # Reset playback cache to avoid stale remaining-ms triggering next pick
     fresh_playback = state.playback.model_copy(update={
