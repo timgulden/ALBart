@@ -266,7 +266,7 @@ def _initiate_orbit_pick(
         commands.append(query)
         return LogicResult(state=state, commands=commands)
 
-    # ── TRANSIT: step through 512D toward next anchor ────────────────
+    # ── TRANSIT: step through 25D toward next anchor ─────────────────
     orbit, fraction = advance_transit_step(orbit)
     state = state.model_copy(update={"orbit": orbit})
 
