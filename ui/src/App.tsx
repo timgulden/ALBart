@@ -956,7 +956,7 @@ function OrbitViewer({ anchors, progress, onClose }: {
   const actuallyDwelling = phase === 'dwell' && (
     currentSetStart === 'ORBIT DWELL' || dwellElapsed > 300
   )
-  const effectivePhase = actuallyDwelling ? 'dwell' : (phase === 'transit' ? 'transit' : phase)
+  const effectivePhase = actuallyDwelling ? 'dwell' : 'transit'
   const phaseLabel = effectivePhase === 'dwell'
     ? `Dwelling (${Math.floor(dwellElapsed / 60)}/${Math.floor((progress?.dwell_duration ?? 1800) / 60)}m)`
     : `Transit ${(progress?.transit_total ?? 10) - (progress?.transit_remaining ?? 0)}/${progress?.transit_total ?? 10}`
