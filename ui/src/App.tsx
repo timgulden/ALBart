@@ -701,7 +701,7 @@ function App() {
             <Label>Mood</Label>
             <textarea
               rows={3}
-              placeholder="chill dinner party, jazz, downtempo, no opera..."
+              placeholder="Chill dinner party, nothing harsh, but not classical either"
               value={mood} onChange={e => { setMood(e.target.value); setMoodApplied(false) }}
               style={{ ...inputStyle, width: '100%', resize: 'vertical' }}
             />
