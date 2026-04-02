@@ -224,14 +224,27 @@ def _initiate_orbit_pick(
     last_tid = state.history[-1]
     commands: list[Command] = list(pending_commands)
 
-    # ── Check transit arrival → queue dwell transition ─────────────────
+    # ── Check transit arrival → pick first dwell track ─────────────────
     # The engine marks arrived=True when the last transit track starts.
-    # We set pending_hop_type here so on_track_played will do the actual
-    # phase transition when the first dwell track starts playing.
+    # Now that track is ending — pick a dwell track near the anchor.
     if orbit.phase == OrbitPhase.TRANSIT and orbit.arrived:
         state = state.model_copy(update={
             "pending_hop_type": "ORBIT DWELL",
         })
+        # Pick from anchor neighborhood (same as dwell), not another transit step
+        anchor_ids = frozenset(a.track_id for a in orbit.anchors)
+        dwell_state = state.model_copy(update={
+            "played": state.played | anchor_ids,
+        })
+        anchor_tid = orbit.anchors[orbit.current_index].track_id
+        query = build_neighbor_query(
+            dwell_state,
+            target_track_id=anchor_tid,
+            space="25d",
+            hop_type="orbit_dwell",
+        )
+        commands.append(query)
+        return LogicResult(state=state, commands=commands)
 
     # ── Check dwell → transit transition ─────────────────────────────
     if orbit.phase == OrbitPhase.DWELL and should_leave_dwell(orbit, now):
