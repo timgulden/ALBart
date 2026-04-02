@@ -641,15 +641,13 @@ function App() {
               )}
             </div>
 
-            {/* Anchor descriptions (editable) */}
-            <div style={{
-              marginTop: 14, padding: 14,
-              background: '#0f1729', borderRadius: 8,
-              border: '1px solid #2a2f45',
-              minHeight: 60,
-            }}>
-              {orbitDescriptions.length > 0 ? (
-                <>
+            {orbitDescriptions.length > 0 && (
+              <>
+                <div style={{
+                  marginTop: 14, padding: 14,
+                  background: '#0f1729', borderRadius: 8,
+                  border: '1px solid #2a2f45',
+                }}>
                   <div style={{ fontSize: 13, color: '#667', marginBottom: 6 }}>
                     Anchors (editable, one per line):
                   </div>
@@ -665,35 +663,27 @@ function App() {
                       lineHeight: 1.6, resize: 'vertical',
                     }}
                   />
-                </>
-              ) : (
-                <div style={{ fontSize: 14, color: '#444', fontStyle: 'italic' }}>
-                  Describe a journey and click Interpret to generate waypoints
                 </div>
-              )}
-            </div>
 
-            <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-              <button
-                onClick={applyOrbit}
-                disabled={orbitDescriptions.length === 0 || orbitApplied}
-                style={{
-                  ...btnStyle(
-                    orbitDescriptions.length === 0 ? '#333'
-                      : orbitApplied ? '#555'
-                      : '#2ecc71'
-                  ),
-                  flex: 1,
-                }}
-              >
-                {orbitApplied ? 'Active' : 'Apply Orbit'}
-              </button>
-              {(status?.orbit_active || orbitApplied) && (
-                <button onClick={clearOrbit} style={btnStyle('#e74c3c')}>
-                  Clear
+                <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                  <button
+                    onClick={applyOrbit}
+                    disabled={orbitApplied}
+                    style={{
+                      ...btnStyle(orbitApplied ? '#555' : '#2ecc71'),
+                      flex: 1,
+                    }}
+                  >
+                    {orbitApplied ? 'Active' : 'Apply Orbit'}
+                  </button>
+                  {(status?.orbit_active || orbitApplied) && (
+                    <button onClick={clearOrbit} style={btnStyle('#e74c3c')}>
+                      Clear
                 </button>
               )}
             </div>
+              </>
+            )}
 
             {/* Orbit viewer button */}
             {status?.orbit_active && status.orbit_anchors.length > 0 && (
@@ -725,17 +715,15 @@ function App() {
               {moodPending ? 'Interpreting...' : 'Interpret'}
             </button>
 
-            {/* Claude's interpretation */}
-            <div style={{
-              marginTop: 14, padding: 14,
-              background: '#0f1729', borderRadius: 8,
-              border: '1px solid #2a2f45',
-              minHeight: 60,
-            }}>
-              {moodDescriptors.length > 0 ? (
-                <>
+            {moodDescriptors.length > 0 && (
+              <>
+                <div style={{
+                  marginTop: 14, padding: 14,
+                  background: '#0f1729', borderRadius: 8,
+                  border: '1px solid #2a2f45',
+                }}>
                   <div style={{ fontSize: 13, color: '#667', marginBottom: 6 }}>
-                    Descriptors (editable):
+                    Clusters (editable):
                   </div>
                   <textarea
                     rows={8}
@@ -749,41 +737,33 @@ function App() {
                       lineHeight: 1.6, resize: 'vertical',
                     }}
                   />
-                </>
-              ) : (
-                <div style={{ fontSize: 14, color: '#444', fontStyle: 'italic' }}>
-                  Click Interpret to see how Claude breaks down your mood description
                 </div>
-              )}
-            </div>
 
-            <button
-              onClick={applyMood}
-              disabled={moodDescriptors.length === 0 || moodApplied}
-              style={{
-                ...btnStyle(
-                  moodDescriptors.length === 0 ? '#333'
-                    : moodApplied ? '#555'
-                    : '#2ecc71'
-                ),
-                marginTop: 10, width: '100%',
-              }}
-            >
-              {moodApplied ? 'Applied ✓' : 'Apply Mood'}
-            </button>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 8 }}>
-              {status && status.mood_in_count > 0 && status.total_tracks > 0 && moodApplied && (
-                <span style={{ fontSize: 13, color: '#888', flex: 1, textAlign: 'center' }}>
-                  {status.mood_in_count}/{status.total_tracks} tracks in-mood
-                  ({Math.round(100 * status.mood_in_count / status.total_tracks)}%)
-                </span>
-              )}
-              {moodApplied && (
-                <button onClick={clearMood} style={{ ...btnStyle('#e74c3c'), fontSize: 13, padding: '4px 12px' }}>
-                  Clear
+                <button
+                  onClick={applyMood}
+                  disabled={moodApplied}
+                  style={{
+                    ...btnStyle(moodApplied ? '#555' : '#2ecc71'),
+                    marginTop: 10, width: '100%',
+                  }}
+                >
+                  {moodApplied ? 'Applied ✓' : 'Apply Mood'}
                 </button>
-              )}
-            </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 8 }}>
+                  {status && status.mood_in_count > 0 && status.total_tracks > 0 && moodApplied && (
+                    <span style={{ fontSize: 13, color: '#888', flex: 1, textAlign: 'center' }}>
+                      {status.mood_in_count}/{status.total_tracks} tracks in-mood
+                      ({Math.round(100 * status.mood_in_count / status.total_tracks)}%)
+                    </span>
+                  )}
+                  {moodApplied && (
+                    <button onClick={clearMood} style={{ ...btnStyle('#e74c3c'), fontSize: 13, padding: '4px 12px' }}>
+                      Clear
+                    </button>
+                  )}
+                </div>
+              </>
+            )}
           </Card>
 
           {/* Temperature */}
