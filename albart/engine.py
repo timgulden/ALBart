@@ -183,12 +183,13 @@ class Engine:
         mood_ids = self._mood_mask if state.mood.descriptors else None
 
         if state.orbit is not None and state.orbit.phase.value == "dwell":
-            # Orbit dwell: 25D neighbor around anchor
+            # Orbit dwell: 25D neighbor around anchor (exclude anchor tracks)
             anchor_tid = state.orbit.anchors[state.orbit.current_index].track_id
             target = self._db.get_embedding_25d(anchor_tid)
             if target is not None:
+                exclude = state.played | anchor_ids
                 candidates = self._db.find_neighbors_25d(
-                    target, state.song_k, state.played, mood_ids,
+                    target, state.song_k, exclude, mood_ids,
                 )
             else:
                 candidates = []
