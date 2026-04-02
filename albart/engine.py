@@ -796,7 +796,11 @@ class Engine:
             target_emb.astype(np.float64) - track_emb.astype(np.float64)
         ))
 
-        arrived = check_arrival(orbit, dist) or transit_done(orbit)
+        # Arrival is determined by the step counter only — step 10/10
+        # targets the anchor exactly, so we always arrive in N steps.
+        # No distance-based early arrival (which caused premature 6/10 arrivals
+        # when a transit track happened to land near the anchor by chance).
+        arrived = transit_done(orbit)
         if arrived and not orbit.arrived:
             # Mark as arrived but stay in transit phase — the actual
             # transition to dwell happens when the next pick cycle runs
