@@ -224,27 +224,17 @@ def _initiate_orbit_pick(
     last_tid = state.history[-1]
     commands: list[Command] = list(pending_commands)
 
-    # ── Check transit arrival → pick first dwell track ─────────────────
-    # The engine marks arrived=True when the last transit track starts.
-    # Now that track is ending — pick a dwell track near the anchor.
+    # ── Check transit arrival → transition to dwell ────────────────────
+    # arrived=True is set at pick time when the last transit step runs.
+    # That track (step N/N, targeting the anchor) is now ending.
+    # Transition to dwell and pick from the anchor neighborhood.
     if orbit.phase == OrbitPhase.TRANSIT and orbit.arrived:
+        orbit = start_dwell(orbit, now)
         state = state.model_copy(update={
+            "orbit": orbit,
             "pending_hop_type": "ORBIT DWELL",
         })
-        # Pick from anchor neighborhood (same as dwell), not another transit step
-        anchor_ids = frozenset(a.track_id for a in orbit.anchors)
-        dwell_state = state.model_copy(update={
-            "played": state.played | anchor_ids,
-        })
-        anchor_tid = orbit.anchors[orbit.current_index].track_id
-        query = build_neighbor_query(
-            dwell_state,
-            target_track_id=anchor_tid,
-            space="25d",
-            hop_type="orbit_dwell",
-        )
-        commands.append(query)
-        return LogicResult(state=state, commands=commands)
+        # Falls through to the DWELL block below
 
     # ── Check dwell → transit transition ─────────────────────────────
     if orbit.phase == OrbitPhase.DWELL and should_leave_dwell(orbit, now):
@@ -393,12 +383,6 @@ def on_track_played(
     if new_orbit is not None and state.orbit_picked:
         new_orbit = record_played(new_orbit, track_id)
         commands.append(UpdateOrbitPositionCommand(track_id=track_id))
-
-    # Transition to dwell at the exact moment the first dwell track plays
-    if (new_orbit is not None
-            and new_orbit.phase == OrbitPhase.TRANSIT
-            and hop_label == "ORBIT DWELL"):
-        new_orbit = start_dwell(new_orbit, now)
 
     # Reset playback cache to avoid stale remaining-ms triggering next pick
     fresh_playback = state.playback.model_copy(update={
