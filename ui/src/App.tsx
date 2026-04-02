@@ -742,21 +742,12 @@ function App() {
               {moodApplied ? 'Applied ✓' : 'Apply Mood'}
             </button>
 
-            <div style={{ marginTop: 16 }}>
-              <Slider
-                label="Mood Strictness"
-                value={moodThreshold} min={0} max={0.60} step={0.05}
-                leftLabel="loose (most tracks)"
-                rightLabel="strict (few tracks)"
-                onChange={updateMoodThreshold}
-              />
-              {status && status.total_tracks > 0 && (
-                <div style={{ fontSize: 13, color: '#888', textAlign: 'center', marginTop: -8 }}>
-                  {status.mood_in_count}/{status.total_tracks} tracks in-mood
-                  ({Math.round(100 * status.mood_in_count / status.total_tracks)}%)
-                </div>
-              )}
-            </div>
+            {status && status.mood_in_count > 0 && status.total_tracks > 0 && (
+              <div style={{ fontSize: 13, color: '#888', textAlign: 'center', marginTop: 8 }}>
+                {status.mood_in_count}/{status.total_tracks} tracks in-mood
+                ({Math.round(100 * status.mood_in_count / status.total_tracks)}%)
+              </div>
+            )}
           </Card>
 
           {/* Temperature */}
