@@ -948,15 +948,14 @@ function OrbitViewer({ anchors, progress, onClose }: {
 
   const [hoverIdx, setHoverIdx] = useState<number | null>(null)
 
-  // Show "Transit" until the current track is actually a dwell track
-  // (has ORBIT DWELL set_start marker), so the last transit track
-  // doesn't prematurely show as "Dwelling"
+  // Determine phase from the most recent set_start marker in history.
+  // This is the single source of truth — it's written atomically when
+  // the track starts playing.
   const dwellElapsed = progress?.dwell_elapsed ?? 0
-  const currentSetStart = status?.current_track?.set_start
-  const actuallyDwelling = phase === 'dwell' && (
-    currentSetStart === 'ORBIT DWELL' || dwellElapsed > 300
-  )
-  const effectivePhase = actuallyDwelling ? 'dwell' : 'transit'
+  const lastMarker = status?.history?.find(t => t.set_start)?.set_start
+  const effectivePhase = lastMarker === 'ORBIT DWELL' ? 'dwell'
+    : lastMarker === 'ORBIT TRANSIT' ? 'transit'
+    : phase  // fallback to backend phase if no markers yet
   const phaseLabel = effectivePhase === 'dwell'
     ? `Dwelling (${Math.floor(dwellElapsed / 60)}/${Math.floor((progress?.dwell_duration ?? 1800) / 60)}m)`
     : `Transit ${(progress?.transit_total ?? 10) - (progress?.transit_remaining ?? 0)}/${progress?.transit_total ?? 10}`
