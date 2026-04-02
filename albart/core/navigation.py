@@ -281,6 +281,10 @@ def _initiate_orbit_pick(
 
     # ── TRANSIT: step through 25D toward next anchor ─────────────────
     orbit, fraction = advance_transit_step(orbit)
+    # If this was the last step, mark arrived so the NEXT pick cycle
+    # transitions to dwell instead of running another transit step
+    if transit_done(orbit):
+        orbit = orbit.model_copy(update={"arrived": True})
     state = state.model_copy(update={"orbit": orbit})
 
     target_anchor_tid = orbit.anchors[orbit.current_index].track_id
