@@ -621,15 +621,25 @@ function App() {
               onChange={e => { setOrbitJourney(e.target.value); setOrbitApplied(false) }}
               style={{ ...inputStyle, width: '100%', resize: 'vertical' }}
             />
-            <button
-              onClick={interpretOrbit} disabled={orbitPending}
-              style={{
-                ...btnStyle(orbitPending ? '#555' : '#4a6cf7'),
-                marginTop: 10, width: '100%',
-              }}
-            >
-              {orbitPending ? 'Interpreting...' : 'Interpret'}
-            </button>
+            <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+              <button
+                onClick={interpretOrbit} disabled={orbitPending}
+                style={{
+                  ...btnStyle(orbitPending ? '#555' : '#4a6cf7'),
+                  flex: 1,
+                }}
+              >
+                {orbitPending ? 'Interpreting...' : 'Interpret'}
+              </button>
+              {(orbitJourney || orbitDescriptions.length > 0) && (
+                <button
+                  onClick={() => { setOrbitJourney(''); setOrbitDescriptions([]); setOrbitApplied(false) }}
+                  style={btnStyle('#e74c3c')}
+                >
+                  Clear
+                </button>
+              )}
+            </div>
 
             {/* Anchor descriptions (editable) */}
             <div style={{
