@@ -77,6 +77,53 @@ def embed_audio(
     return vec / (norm + 1e-8)
 
 
+def embed_track(
+    audio: np.ndarray,
+    model: ClapModel,
+    processor: ClapProcessor,
+    device: str,
+    norm_target: float = 0.12,
+    chunk_seconds: int = 10,
+) -> np.ndarray | None:
+    """Embed a track of any length: chunk, embed each, average, normalize.
+
+    Splits the audio into non-overlapping chunks of ``chunk_seconds``.
+    Discards a final partial chunk shorter than ``chunk_seconds``.
+    Returns None if the audio is shorter than one full chunk.
+
+    This is the single authoritative implementation of the chunk-average
+    strategy.  All callers (pipeline, ingestion, runtime) should use this
+    rather than rolling their own loop.
+
+    Args:
+        audio: mono float32 array at 48 kHz (any length).
+        model: loaded CLAP model.
+        processor: CLAP processor.
+        device: torch device string.
+        norm_target: preprocessing normalization (0.12 = compress+LP4k).
+        chunk_seconds: length of each chunk in seconds.
+
+    Returns:
+        L2-normalized (512,) float32 embedding, or None if too short.
+    """
+    chunk_samples = chunk_seconds * SAMPLE_RATE
+    n_chunks = len(audio) // chunk_samples
+
+    if n_chunks < 1:
+        return None  # track shorter than one chunk
+
+    chunk_embs = []
+    for i in range(n_chunks):
+        start = i * chunk_samples
+        chunk = audio[start:start + chunk_samples]
+        chunk_embs.append(
+            embed_audio(chunk, model, processor, device, norm_target=norm_target)
+        )
+
+    avg = np.mean(chunk_embs, axis=0).astype(np.float32)
+    return (avg / (np.linalg.norm(avg) + 1e-8)).astype(np.float32)
+
+
 def save_embeddings_to_db(
     track_ids: list[str],
     embeddings: np.ndarray,

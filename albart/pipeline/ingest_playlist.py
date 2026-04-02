@@ -385,7 +385,7 @@ def main() -> None:
 
     # Phase 2: Compute CLAP embeddings (sequential — GPU bottleneck)
     logger.info("Phase 2: Computing CLAP embeddings...")
-    from albart.pipeline.embedder import SAMPLE_RATE, embed_audio, load_model
+    from albart.pipeline.embedder import SAMPLE_RATE, embed_track, load_model
     from albart.utils import DATA_DIR, load_config
 
     config = load_config()
@@ -393,10 +393,6 @@ def main() -> None:
 
     model, processor, device = load_model(allow_mps=True)
     logger.info("CLAP model loaded on %s", device)
-
-    chunk_samples = 10 * SAMPLE_RATE
-    n_chunks = 3
-    total_samples = n_chunks * chunk_samples
 
     embeddings = {}  # track_id → (512,) float32
     for tid, info in tqdm(downloaded.items(), desc="Embedding"):
@@ -406,21 +402,10 @@ def main() -> None:
             audio, _ = librosa.load(str(audio_path), sr=SAMPLE_RATE, mono=True,
                                     dtype="float32")
 
-            if len(audio) < total_samples:
-                audio = np.pad(audio, (total_samples - len(audio), 0))
-            else:
-                audio = audio[-total_samples:]
-
-            chunk_embs = []
-            for i in range(n_chunks):
-                chunk = audio[i * chunk_samples:(i + 1) * chunk_samples]
-                chunk_embs.append(
-                    embed_audio(chunk, model, processor, device,
-                                norm_target=norm_target)
-                )
-
-            emb = np.mean(chunk_embs, axis=0).astype(np.float32)
-            emb = emb / (np.linalg.norm(emb) + 1e-8)
+            emb = embed_track(audio, model, processor, device, norm_target=norm_target)
+            if emb is None:
+                logger.warning("Track too short to embed: %s", tid)
+                continue
             embeddings[tid] = emb
         except Exception as e:
             logger.error("Embedding failed for %s: %s", tid, e)

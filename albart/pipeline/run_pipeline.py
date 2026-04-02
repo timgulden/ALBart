@@ -122,11 +122,6 @@ def run(force: bool = False, skip_spotify: bool = False) -> None:
     ]
     print(f"Computing embeddings for {len(embeddable)} tracks...")
 
-    CHUNK_SAMPLES = 10 * 48000  # 10s at 48kHz
-    N_CHUNKS = 3
-
-    # Normalization target for the norm path (dual-index legacy; we store
-    # the norm variant in PostgreSQL as the primary embedding)
     norm_target = float(config.get("pipeline", {}).get("norm_target", 0.12))
 
     new_ids = []
@@ -138,22 +133,12 @@ def run(force: bool = False, skip_spotify: bool = False) -> None:
 
         try:
             audio, _ = librosa.load(str(preview_path), sr=48000, mono=True, dtype="float32")
+            emb = embedder.embed_track(audio, model, processor, device, norm_target=norm_target)
 
-            chunk_embs = []
-            for i in range(N_CHUNKS):
-                start = i * CHUNK_SAMPLES
-                chunk = audio[start:start + CHUNK_SAMPLES]
-                if len(chunk) == 0:
-                    break
-                if len(chunk) < CHUNK_SAMPLES:
-                    chunk = np.pad(chunk, (0, CHUNK_SAMPLES - len(chunk)))
-                chunk_embs.append(
-                    embedder.embed_audio(chunk, model, processor, device, norm_target=norm_target)
-                )
-
-            # Average chunks and re-normalize
-            avg = np.mean(chunk_embs, axis=0).astype(np.float32)
-            emb = (avg / (np.linalg.norm(avg) + 1e-8)).astype(np.float32)
+            if emb is None:
+                logger.warning("Track too short to embed: %s", track_id)
+                database.update_embedding_status(track_id, "error")
+                continue
 
             new_ids.append(track_id)
             new_embeddings.append(emb)

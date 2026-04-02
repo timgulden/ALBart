@@ -13,7 +13,7 @@ import time
 
 import numpy as np
 
-from albart.pipeline.embedder import SAMPLE_RATE, embed_audio, load_model
+from albart.pipeline.embedder import SAMPLE_RATE, embed_audio, embed_track, load_model
 from albart.runtime.audio import AudioBuffer
 
 logger = logging.getLogger(__name__)
@@ -31,8 +31,7 @@ class EmbeddingWorker:
     computes a CLAP embedding, and posts it to a result queue.
     """
 
-    CHUNK_SAMPLES = 10 * SAMPLE_RATE   # 10s per chunk
-    N_CHUNKS = 3                        # embed 3 chunks from the 30s buffer, then average
+    CHUNK_SECONDS = 10                  # chunk length in seconds
 
     def __init__(
         self,
@@ -79,22 +78,16 @@ class EmbeddingWorker:
             t0 = time.monotonic()
             try:
                 audio = self.audio_buffer.read()
-                total = self.N_CHUNKS * self.CHUNK_SAMPLES
-                if len(audio) < total:
-                    audio = np.pad(audio, (total - len(audio), 0))
-                else:
-                    audio = audio[-total:]
 
-                # Embed 3 × 10s chunks, average
-                chunk_embs = []
-                for i in range(self.N_CHUNKS):
-                    chunk = audio[i * self.CHUNK_SAMPLES:(i + 1) * self.CHUNK_SAMPLES]
-                    chunk_embs.append(
-                        embed_audio(chunk, self.model, self.processor, self.device,
-                                    norm_target=self.norm_target)
-                    )
+                raw_emb = embed_track(
+                    audio, self.model, self.processor, self.device,
+                    norm_target=self.norm_target,
+                    chunk_seconds=self.CHUNK_SECONDS,
+                )
+                if raw_emb is None:
+                    continue  # buffer too short
 
-                emb = _avg_normalize(chunk_embs)
+                emb = raw_emb
 
                 # EMA smoothing
                 if self._ema is None or self.alpha >= 1.0:

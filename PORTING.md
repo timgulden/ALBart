@@ -144,8 +144,7 @@ work once decoded to a numpy array.
 
 ```python
 import librosa
-import numpy as np
-from albart.pipeline.embedder import embed_audio, load_model
+from albart.pipeline.embedder import embed_track, load_model
 
 # Load your audio file (any format librosa supports)
 audio, _ = librosa.load("track.flac", sr=48000, mono=True, dtype="float32")
@@ -153,35 +152,34 @@ audio, _ = librosa.load("track.flac", sr=48000, mono=True, dtype="float32")
 # Load CLAP model (do this once, reuse for all tracks)
 model, processor, device = load_model(allow_mps=True)
 
-# Embed (3x10s chunks averaged, same as the pipeline)
-sr = 48000
-chunk_samples = 10 * sr
-n_chunks = 3
-total = n_chunks * chunk_samples
-
-if len(audio) < total:
-    audio = np.pad(audio, (total - len(audio), 0))
-
-chunk_embs = []
-for i in range(n_chunks):
-    chunk = audio[i * chunk_samples:(i + 1) * chunk_samples]
-    chunk_embs.append(embed_audio(chunk, model, processor, device, norm_target=0.12))
-
-emb_512 = np.mean(chunk_embs, axis=0).astype(np.float32)
-emb_512 = emb_512 / (np.linalg.norm(emb_512) + 1e-8)
+# Embed the full track
+emb_512 = embed_track(audio, model, processor, device, norm_target=0.12)
+# Returns None if track is shorter than 10 seconds
 ```
+
+`embed_track()` is the single authoritative embedding function.  It
+splits the audio into non-overlapping 10-second chunks, embeds each
+with CLAP, averages them, and L2-normalizes the result.  A final
+partial chunk shorter than 10 seconds is discarded.  Tracks shorter
+than 10 seconds return None and should be skipped.
+
+This means a 30-second preview gets 3 chunks (matching the Spotify
+pipeline), while a full 4-minute track gets 24 chunks — a more
+representative embedding that captures intro, verse, chorus, bridge,
+and outro.
 
 The `norm_target=0.12` parameter applies dynamic range compression
 and a 4kHz low-pass filter before CLAP inference.  This was tuned
 for consistency across different recording qualities.  Use the same
 value for all tracks.
 
-**Note on audio quality:** ALBart's Spotify pipeline embeds 30-second
-preview clips.  If you have full-length high-quality audio, your
-embeddings may actually be *better*.  The 3x10s chunk averaging
-captures a representative sample of the track's character.  For very
-long tracks (>10 minutes), you might want to sample chunks from
-different parts of the track rather than just the last 30 seconds.
+**Note on audio quality:** If you have full-length high-quality
+audio, your embeddings will likely be *better* than the 30-second
+Spotify previews.  More chunks means more representative averaging.
+The chunk-average strategy may benefit from experimentation — for
+example, weighting chunks by energy so louder (typically more
+characteristic) sections contribute more.  The current equal-weight
+average is a solid starting point.
 
 #### Projecting to 25D
 

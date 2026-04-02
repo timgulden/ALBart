@@ -107,32 +107,19 @@ def ingest_track(
 
     try:
         import librosa
-        from albart.pipeline.embedder import SAMPLE_RATE, embed_audio
+        from albart.pipeline.embedder import SAMPLE_RATE, embed_track
         from albart.utils import DATA_DIR
 
         audio_path = DATA_DIR / preview_path
         audio, _ = librosa.load(str(audio_path), sr=SAMPLE_RATE, mono=True,
                                 dtype="float32")
 
-        # 3-chunk averaging (same as pipeline)
-        chunk_samples = 10 * SAMPLE_RATE
-        n_chunks = 3
-        total = n_chunks * chunk_samples
-        if len(audio) < total:
-            audio = np.pad(audio, (total - len(audio), 0))
-        else:
-            audio = audio[-total:]
-
-        chunk_embs = []
-        for i in range(n_chunks):
-            chunk = audio[i * chunk_samples:(i + 1) * chunk_samples]
-            chunk_embs.append(
-                embed_audio(chunk, clap_model, clap_processor, clap_device,
-                            norm_target=norm_target)
-            )
-
-        emb_512 = np.mean(chunk_embs, axis=0).astype(np.float32)
-        emb_512 = emb_512 / (np.linalg.norm(emb_512) + 1e-8)
+        emb_512 = embed_track(audio, clap_model, clap_processor, clap_device,
+                              norm_target=norm_target)
+        if emb_512 is None:
+            logger.warning("Track too short to embed: %s", track_id)
+            _update_status(db, track_id, "error")
+            return False
 
     except Exception as e:
         logger.error("Embedding failed for %s: %s", track_id, e)
