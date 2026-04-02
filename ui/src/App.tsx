@@ -946,6 +946,8 @@ function OrbitViewer({ anchors, progress, onClose }: {
   const phase = progress?.phase ?? 'dwell'
   const completedSegments = new Set(progress?.completed_segments ?? [])
 
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null)
+
   const phaseLabel = phase === 'dwell'
     ? `Dwelling (${Math.floor((progress?.dwell_elapsed ?? 0) / 60)}/${Math.floor((progress?.dwell_duration ?? 1800) / 60)}m)`
     : `Transit ${(progress?.transit_total ?? 10) - (progress?.transit_remaining ?? 0)}/${progress?.transit_total ?? 10}`
@@ -1039,17 +1041,23 @@ function OrbitViewer({ anchors, progress, onClose }: {
           const p = positions[i]
           const isDwelling = (i === curIdx && phase === 'dwell')
           return (
-            <div key={`cover-${i}`} style={{
-              position: 'absolute',
-              left: 16 + p.x - coverSize / 2,
-              top: 16 + p.y - coverSize / 2,
-              width: coverSize, height: coverSize,
-              borderRadius: 6,
-              border: isDwelling ? '3px solid #2ecc71' : '2px solid #334',
-              overflow: 'hidden',
-              boxShadow: isDwelling ? '0 0 12px #2ecc7166' : 'none',
-              transition: 'border-color 0.3s, box-shadow 0.3s',
-            }}>
+            <div
+              key={`cover-${i}`}
+              onMouseEnter={() => setHoverIdx(i)}
+              onMouseLeave={() => setHoverIdx(null)}
+              style={{
+                position: 'absolute',
+                left: 16 + p.x - coverSize / 2,
+                top: 16 + p.y - coverSize / 2,
+                width: coverSize, height: coverSize,
+                borderRadius: 6,
+                border: isDwelling ? '3px solid #2ecc71' : '2px solid #334',
+                overflow: 'hidden',
+                boxShadow: isDwelling ? '0 0 12px #2ecc7166' : 'none',
+                transition: 'border-color 0.3s, box-shadow 0.3s',
+                cursor: 'pointer',
+              }}
+            >
               <img
                 src={`http://127.0.0.1:8765${a.art_url}`}
                 alt={a.title}
@@ -1067,6 +1075,45 @@ function OrbitViewer({ anchors, progress, onClose }: {
             </div>
           )
         })}
+
+        {/* Tooltip on hover */}
+        {hoverIdx !== null && anchors[hoverIdx] && (() => {
+          const a = anchors[hoverIdx]
+          const p = positions[hoverIdx]
+          const tipW = 160
+          const tipH = 200
+          // Position tooltip to avoid going off-screen
+          const tipX = p.x > cx ? 16 + p.x - coverSize / 2 - tipW - 8 : 16 + p.x + coverSize / 2 + 8
+          const tipY = Math.max(4, Math.min(16 + p.y - tipH / 2, size - tipH + 16))
+          return (
+            <div style={{
+              position: 'absolute',
+              left: tipX, top: tipY,
+              width: tipW,
+              background: 'rgba(10, 14, 28, 0.95)',
+              borderRadius: 8,
+              border: '1px solid #334',
+              overflow: 'hidden',
+              pointerEvents: 'none',
+              zIndex: 10,
+            }}>
+              <img
+                src={`http://127.0.0.1:8765${a.art_url}`}
+                alt={a.title}
+                style={{ width: tipW, height: tipW, objectFit: 'cover' }}
+              />
+              <div style={{ padding: '6px 8px' }}>
+                <div style={{ fontSize: 12, fontWeight: 600, color: '#eee' }}>{a.title}</div>
+                <div style={{ fontSize: 11, color: '#999', marginTop: 2 }}>{a.artist}</div>
+                {a.description && (
+                  <div style={{ fontSize: 10, color: '#666', marginTop: 4, fontStyle: 'italic' }}>
+                    {a.description}
+                  </div>
+                )}
+              </div>
+            </div>
+          )
+        })()}
       </div>
     </div>
   )
