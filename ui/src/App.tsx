@@ -949,7 +949,7 @@ function OrbitViewer({ anchors, progress, onClose }: {
   const dwellElapsed = progress?.dwell_elapsed ?? 0
   const phaseLabel = phase === 'dwell'
     ? `Dwelling (${Math.floor(dwellElapsed / 60)}/${Math.floor((progress?.dwell_duration ?? 1800) / 60)}m)`
-    : `Transit ${(progress?.transit_total ?? 10) - (progress?.transit_remaining ?? 0)}/${progress?.transit_total ?? 10}`
+    : `Transit ${Math.min((progress?.transit_total ?? 10) - Math.max(progress?.transit_remaining ?? 0, 0), progress?.transit_total ?? 10)}/${progress?.transit_total ?? 10}`
 
   return (
     <div style={{
