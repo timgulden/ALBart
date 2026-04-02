@@ -126,13 +126,11 @@ function App() {
               }
             }
             // Sync local mood/orbit "applied" flags with server
-            // (clears UI indicators after a server restart, but only
-            // if the user had previously applied — don't wipe descriptors
-            // the user is still reviewing)
-            if (data.mood_descriptors.length === 0 && moodApplied) {
+            // (clears UI indicators after a server restart)
+            if (data.mood_descriptors.length === 0) {
               setMoodApplied(false)
             }
-            if (!data.orbit_active && orbitApplied) {
+            if (!data.orbit_active) {
               setOrbitApplied(false)
             }
           }
