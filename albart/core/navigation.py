@@ -224,6 +224,17 @@ def _initiate_orbit_pick(
     last_tid = state.history[-1]
     commands: list[Command] = list(pending_commands)
 
+    # ── Check transit arrival → dwell transition ──────────────────────
+    # The engine marks arrived=True when the last transit track starts.
+    # We delay the actual phase change to here — when the arriving track
+    # is ending and we're about to pick the first dwell track.
+    if orbit.phase == OrbitPhase.TRANSIT and orbit.arrived:
+        orbit = start_dwell(orbit, now)
+        state = state.model_copy(update={
+            "orbit": orbit,
+            "pending_hop_type": "ORBIT DWELL",
+        })
+
     # ── Check dwell → transit transition ─────────────────────────────
     if orbit.phase == OrbitPhase.DWELL and should_leave_dwell(orbit, now):
         # Compute initial distance for the transit (engine handles this

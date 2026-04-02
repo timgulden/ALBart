@@ -948,15 +948,8 @@ function OrbitViewer({ anchors, progress, onClose }: {
 
   const [hoverIdx, setHoverIdx] = useState<number | null>(null)
 
-  // Determine phase from the most recent set_start marker in history.
-  // This is the single source of truth — it's written atomically when
-  // the track starts playing.
   const dwellElapsed = progress?.dwell_elapsed ?? 0
-  const lastMarker = status?.history?.find(t => t.set_start)?.set_start
-  const effectivePhase = lastMarker === 'ORBIT DWELL' ? 'dwell'
-    : lastMarker === 'ORBIT TRANSIT' ? 'transit'
-    : phase  // fallback to backend phase if no markers yet
-  const phaseLabel = effectivePhase === 'dwell'
+  const phaseLabel = phase === 'dwell'
     ? `Dwelling (${Math.floor(dwellElapsed / 60)}/${Math.floor((progress?.dwell_duration ?? 1800) / 60)}m)`
     : `Transit ${(progress?.transit_total ?? 10) - (progress?.transit_remaining ?? 0)}/${progress?.transit_total ?? 10}`
 
@@ -978,7 +971,7 @@ function OrbitViewer({ anchors, progress, onClose }: {
         }}
       >
         <span style={{ fontSize: 13, color: '#888', fontWeight: 600 }}>
-          Orbit — <span style={{ color: effectivePhase === 'transit' ? '#f0c040' : '#2ecc71' }}>{phaseLabel}</span>
+          Orbit — <span style={{ color: phase === 'transit' ? '#f0c040' : '#2ecc71' }}>{phaseLabel}</span>
         </span>
         <button
           onClick={onClose}
@@ -1047,7 +1040,7 @@ function OrbitViewer({ anchors, progress, onClose }: {
 
         {anchors.map((a, i) => {
           const p = positions[i]
-          const isDwelling = (i === curIdx && effectivePhase === 'dwell')
+          const isDwelling = (i === curIdx && phase === 'dwell')
           return (
             <div
               key={`cover-${i}`}

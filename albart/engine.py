@@ -790,10 +790,17 @@ class Engine:
         ))
 
         arrived = check_arrival(orbit, dist) or transit_done(orbit)
-        if arrived:
-            state = on_orbit_transit_arrival(state, now)
+        if arrived and not orbit.arrived:
+            # Mark as arrived but stay in transit phase — the actual
+            # transition to dwell happens when the next pick cycle runs
+            # (i.e., when this arriving track is about to end).
+            # This prevents the UI from showing "Dwelling" while the
+            # last transit track is still playing.
+            new_orbit = orbit.model_copy(update={"arrived": True})
+            state = state.model_copy(update={"orbit": new_orbit})
             logger.info(
-                "Orbit transit arrived at [%d] (dist=%.4f, steps used=%d/%d)",
+                "Orbit transit arrived at [%d] (dist=%.4f, steps used=%d/%d) — "
+                "will transition to dwell when track ends",
                 orbit.current_index,
                 dist,
                 orbit.transit_total - orbit.transit_remaining,
