@@ -397,13 +397,13 @@ The existing pipeline functions are reusable:
 - `albart.effects.umap_projector.UmapProjector` — 512D → 25D
 - `albart.effects.database.DatabaseClient` — PostgreSQL storage
 
-CLAP embedding is fast — about 0.14 seconds per track on Apple
-Silicon (MPS), including file load, resample, and 3x10s chunk
-inference.  For a million-track library, that's roughly 39 hours
-on a single Mac.  With large uncompressed FLACs (longer load times),
-budget 0.3-0.5s per track — still under a week for 1M tracks.  The
-embedding step is embarrassingly parallel and can be split across
-multiple machines if needed.
+CLAP embedding is fast — about 0.1 seconds per track on Apple
+Silicon (MPS), including file load, resample, preprocessing, and
+inference.  A 5,000-track library embeds in about 8 minutes; a
+million tracks would take roughly 27 hours on a single Mac.  With
+large uncompressed FLACs (longer load times), budget somewhat more.
+The embedding step is embarrassingly parallel and can be split
+across multiple machines if needed.
 
 After bulk ingestion, retrain the parametric UMAP to incorporate the
 new tracks:
