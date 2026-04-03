@@ -610,43 +610,25 @@ def interpret_orbit(req: OrbitRequest) -> dict:
         client = anthropic.Anthropic()
         response = client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=512,
+            max_tokens=1024,
+            system="You are a JSON API. Return only valid JSON, no commentary.",
             messages=[{
                 "role": "user",
                 "content": (
                     "I have an AI DJ that navigates my music library through "
-                    "high-dimensional audio embedding space. When I give it a "
-                    "sequence of anchor tracks, it:\n\n"
-                    "1. Dwells near each anchor for ~30 minutes, playing tracks "
-                    "from the same genre neighborhood\n"
-                    "2. Transits between anchors through intermediate tracks "
-                    "that bridge the genre gap\n"
-                    "3. Cycles back to the first anchor and repeats\n\n"
-                    "The DJ handles all transitions and genre exploration "
-                    "automatically. Your job is to pick the anchor waypoints "
-                    "— the iconic destinations that define the journey.\n\n"
-                    "The user described this journey:\n"
-                    f'"{req.description}"\n\n'
-                    "Pick 4-8 anchor tracks from my library. Each anchor "
-                    "defines a genre neighborhood the DJ will explore, so:\n"
-                    "- Choose tracks that are unmistakably representative of "
-                    "their genre or era\n"
-                    "- Space anchors across distinct musical territories — the "
-                    "DJ fills the gaps\n"
-                    "- Order them so the sequence tells a story — dramatic "
-                    "jumps between very different genres are fine, the DJ is "
-                    "skilled at finding surprising connections across any "
-                    "genre gap\n"
-                    "- The last anchor should connect naturally back to the "
-                    "first (it's a cycle)\n"
-                    "- Pick more anchors for complex multi-genre journeys, "
-                    "fewer for focused ones\n\n"
-                    "My library (one artist per line, with their tracks):\n\n"
+                    "audio embedding space. It dwells near anchor tracks for "
+                    "~30 minutes (playing genre neighbors), then transits "
+                    "between anchors through bridging tracks. It cycles.\n\n"
+                    f'Journey: "{req.description}"\n\n'
+                    "Pick 4-8 anchor tracks from my library. Rules:\n"
+                    "- Choose tracks unmistakably representative of their "
+                    "genre/era\n"
+                    "- Space anchors across distinct musical territories\n"
+                    "- Order so the sequence tells a story (it's a cycle)\n"
+                    "- Copy artist and title exactly from the library\n\n"
+                    "My library:\n\n"
                     f"{library_text}\n\n"
-                    "Format each track as \"Artist \u2014 Title\", copying the "
-                    "artist and title exactly from the library above. Reply "
-                    "with only a JSON object:\n"
-                    "{\"tracks\": [\"Artist \u2014 Title\", \"Artist \u2014 Title\", ...]}"
+                    '{"tracks": ["Artist \u2014 Title", ...]}'
                 ),
             }],
         )
