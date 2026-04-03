@@ -54,7 +54,6 @@ from albart.effects.udp_listener import UDPListener
 from albart.engine import Engine
 from albart.server.models import (
     DescriptorsUpdate,
-    DeviceInfo,
     MoodThresholdUpdate,
     MoodUpdate,
     OrbitAnchorInfo,
@@ -555,26 +554,7 @@ def search_tracks(q: str, limit: int = 10) -> list[TrackInfo]:
     return [TrackInfo(track_id=r.track_id, title=r.title, artist=r.artist) for r in results]
 
 
-# ── Devices & Volume ─────────────────────────────────────────────────
-
-@app.get("/api/devices")
-def get_devices() -> list[DeviceInfo]:
-    if _engine is None:
-        return []
-    # Device listing is player-specific (Spotify has multiple devices)
-    pb = _engine.playback
-    if not hasattr(pb, "get_devices"):
-        return []
-    devices = pb.get_devices()
-    return [
-        DeviceInfo(
-            id=d["id"], name=d["name"], type=d["type"],
-            is_active=d["is_active"],
-            volume=d.get("volume_percent", 0),
-        )
-        for d in devices
-    ]
-
+# ── Volume ───────────────────────────────────────────────────────────
 
 @app.put("/api/volume")
 def set_volume(req: VolumeUpdate) -> dict:
@@ -582,17 +562,6 @@ def set_volume(req: VolumeUpdate) -> dict:
         return {"error": "No active session"}
     _engine.playback.set_volume(req.volume)
     return {"volume": req.volume}
-
-
-@app.post("/api/device/{device_id}")
-def set_device(device_id: str) -> dict:
-    if _engine is None:
-        return {"error": "No active session"}
-    pb = _engine.playback
-    if not hasattr(pb, "transfer_playback"):
-        return {"error": "Device transfer not supported by this player"}
-    pb.transfer_playback(device_id)
-    return {"status": "transferred", "device": device_id}
 
 
 # ── Album art ────────────────────────────────────────────────────────

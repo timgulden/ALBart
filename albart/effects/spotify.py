@@ -69,45 +69,18 @@ class SpotifyClient:
             return PlaybackSnapshot(snapshot_time=time.monotonic())
 
     def play_track(self, track_id: str) -> bool:
-        """Start playing a track.  Returns True on success.
+        """Start playing a track on the currently active Spotify device.
 
-        Falls back to the first available device if no active device
-        is found (e.g. after sleep/wake).
+        Does NOT attempt to select or transfer devices — the user
+        manages device selection directly from Spotify.
         """
         uri = f"spotify:track:{track_id}"
         try:
             self.sp.start_playback(uris=[uri])
             return True
-        except Exception:
-            pass
-
-        # No active playback — find any available device
-        device = self._get_active_device()
-        if device:
-            try:
-                self.sp.start_playback(uris=[uri], device_id=device)
-                return True
-            except Exception as e:
-                logger.warning("Playback failed on device %s: %s", device, e)
-
-        # Last resort: try to wake the first device by transferring to it
-        try:
-            devices = self.sp.devices()
-            for d in devices.get("devices", []):
-                try:
-                    self.sp.transfer_playback(d["id"], force_play=False)
-                    import time
-                    time.sleep(1)  # give device a moment to wake
-                    self.sp.start_playback(uris=[uri], device_id=d["id"])
-                    logger.info("Woke device '%s' and started playback", d["name"])
-                    return True
-                except Exception:
-                    continue
-        except Exception:
-            pass
-
-        logger.warning("No Spotify device available for %s", track_id)
-        return False
+        except Exception as e:
+            logger.warning("Playback failed for %s: %s", track_id, e)
+            return False
 
     def resume(self) -> bool:
         try:
@@ -133,27 +106,12 @@ class SpotifyClient:
             logger.warning("Seek failed: %s", e)
             return False
 
-    def get_devices(self) -> List[dict]:
-        try:
-            result = self.sp.devices()
-            return result.get("devices", [])
-        except Exception:
-            return []
-
     def set_volume(self, volume: int) -> bool:
         try:
             self.sp.volume(max(0, min(100, volume)))
             return True
         except Exception as e:
             logger.warning("Volume set failed: %s", e)
-            return False
-
-    def transfer_playback(self, device_id: str, force_play: bool = True) -> bool:
-        try:
-            self.sp.transfer_playback(device_id, force_play=force_play)
-            return True
-        except Exception as e:
-            logger.warning("Transfer failed: %s", e)
             return False
 
     def get_track_metadata(self, track_id: str) -> Optional[tuple[str, str]]:
@@ -170,15 +128,3 @@ class SpotifyClient:
         except Exception:
             return None
 
-    def _get_active_device(self) -> Optional[str]:
-        """Find an active Spotify device."""
-        try:
-            devices = self.sp.devices()
-            for d in devices.get("devices", []):
-                if d.get("is_active"):
-                    return d["id"]
-            for d in devices.get("devices", []):
-                return d["id"]
-        except Exception:
-            pass
-        return None
