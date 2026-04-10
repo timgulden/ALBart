@@ -63,7 +63,7 @@ from albart.server.models import (
     ProcessStatus,
     SeekRequest,
     SetDistanceUpdate,
-    SongKUpdate,
+    TemperatureUpdate,
     StartRequest,
     StatusResponse,
     SystemStatus,
@@ -139,7 +139,7 @@ def _run_engine(engine: Engine, seed: Optional[str]) -> None:
 def get_status() -> StatusResponse:
     if _engine is None:
         return StatusResponse(
-            playing=False, song_k=10, set_distance=5.0,
+            playing=False, temperature=0.5, set_distance=5.0,
             mood_descriptors=[], mood_threshold=0.35, mood_in_count=0,
             played_count=0, total_tracks=_get_db().get_total_tracks(), history=[],
         )
@@ -192,11 +192,11 @@ def get_status() -> StatusResponse:
         orbit_progress = OrbitProgress(**prog)
 
     return StatusResponse(
-        playing=_engine_thread is not None and _engine_thread.is_alive(),
+        playing=_engine is not None and _engine_thread is not None and _engine_thread.is_alive(),
         current_track=current,
         progress_ms=progress_ms,
         duration_ms=state.playback.duration_ms,
-        song_k=state.song_k,
+        temperature=state.temperature,
         set_distance=state.hop_multiplier,
         mode=state.mode,
         dj_active=state.dj_active,
@@ -235,7 +235,7 @@ def start_session(req: StartRequest) -> dict:
             broadcast=broadcast,
             udp_listener=udp,
             mode=req.mode,
-            song_k=max(1, min(50, req.song_k)),
+            temperature=max(0.0, min(1.0, req.temperature)),
             hop_multiplier=req.set_distance,
             hop_interval_minutes=req.hop_interval,
             projector=_load_projector(),
@@ -260,7 +260,12 @@ def start_session(req: StartRequest) -> dict:
                 seed = req.seed
             else:
                 results = db.search_tracks(req.seed, limit=1)
-                seed = results[0].track_id if results else None
+                if results:
+                    seed = results[0].track_id
+                else:
+                    # Fuzzy match (handles "Artist — Title" descriptions)
+                    all_tracks = db.get_all_tracks()
+                    seed = find_track(req.seed, all_tracks, set())
 
         _engine_thread = threading.Thread(
             target=_run_engine, args=(_engine, seed), daemon=True,
@@ -270,8 +275,31 @@ def start_session(req: StartRequest) -> dict:
     return {"status": "started", "seed": seed}
 
 
+@app.post("/api/pause")
+def pause_session() -> dict:
+    """Pause playback and stop the DJ from picking new tracks."""
+    if _engine is None:
+        return {"error": "No active session"}
+    _engine.update_param("dj_active", False)
+    _engine.playback.pause()
+    logger.info("DJ paused")
+    return {"status": "paused"}
+
+
+@app.post("/api/resume")
+def resume_session() -> dict:
+    """Resume playback and re-activate the DJ."""
+    if _engine is None:
+        return {"error": "No active session"}
+    _engine.playback.resume()
+    _engine.update_param("dj_active", True)
+    logger.info("DJ resumed")
+    return {"status": "resumed"}
+
+
 @app.post("/api/stop")
 def stop_session() -> dict:
+    """Fully shut down the DJ engine (use Ctrl+C from console instead)."""
     global _engine, _engine_thread
     if _engine is not None:
         _engine.request_stop()
@@ -283,13 +311,13 @@ def stop_session() -> dict:
 
 # ── Parameter updates ────────────────────────────────────────────────
 
-@app.put("/api/song_k")
-def set_song_k(req: SongKUpdate) -> dict:
+@app.put("/api/temperature")
+def set_temperature(req: TemperatureUpdate) -> dict:
     if _engine is None:
         return {"error": "No active session"}
-    val = max(1, min(50, req.song_k))
-    _engine.update_param("song_k", val)
-    return {"song_k": val}
+    val = max(0.0, min(1.0, req.temperature))
+    _engine.update_param("temperature", val)
+    return {"temperature": val}
 
 
 @app.put("/api/mood_threshold")
@@ -827,7 +855,7 @@ def auto_start() -> None:
 
         _engine = Engine(
             db=db, playback=spotify, broadcast=broadcast,
-            udp_listener=udp, mode="exact", song_k=10,
+            udp_listener=udp, mode="exact", temperature=0.5,
             projector=_load_projector(),
             norm_target=_get_norm_target(),
         )

@@ -43,7 +43,7 @@ class TestSelectFromCandidates:
             recent_artists=(),
             artist_penalty=0.1,
             allow_same_artist=False,
-            song_k=10,
+            temperature=0.5,
             track_artist_map={},
             rng=rng,
         ) is None
@@ -54,26 +54,33 @@ class TestSelectFromCandidates:
             recent_artists=(),
             artist_penalty=0.1,
             allow_same_artist=False,
-            song_k=10,
+            temperature=0.5,
             track_artist_map={},
             rng=rng,
         )
         assert result == "only_track"
 
-    def test_song_k_1_picks_nearest(self, candidates, rng, artist_map):
-        result = select_from_candidates(
-            candidates,
-            recent_artists=(),
-            artist_penalty=0.1,
-            allow_same_artist=False,
-            song_k=1,
-            track_artist_map=artist_map,
-            rng=rng,
-        )
-        assert result == "track_a"
+    def test_temp_zero_picks_nearest(self, candidates, rng, artist_map):
+        """Temperature 0.0 should almost always pick the nearest track."""
+        picks = {"track_a": 0}
+        for seed in range(200):
+            r = np.random.default_rng(seed)
+            pick = select_from_candidates(
+                candidates,
+                recent_artists=(),
+                artist_penalty=0.1,
+                allow_same_artist=False,
+                temperature=0.0,
+                track_artist_map=artist_map,
+                rng=r,
+            )
+            if pick == "track_a":
+                picks["track_a"] += 1
+        # At temp=0 (exponent=6), P(#1) ≈ 86%+ with these distances
+        assert picks["track_a"] > 150
 
-    def test_song_k_trims_pool(self, candidates, rng, artist_map):
-        """With k=2, only the first 2 candidates should be pickable."""
+    def test_temp_one_spreads_picks(self, candidates, rng, artist_map):
+        """Temperature 1.0 should spread picks across all candidates."""
         picks = set()
         for seed in range(200):
             r = np.random.default_rng(seed)
@@ -82,12 +89,13 @@ class TestSelectFromCandidates:
                 recent_artists=(),
                 artist_penalty=0.1,
                 allow_same_artist=False,
-                song_k=2,
+                temperature=1.0,
                 track_artist_map=artist_map,
                 rng=r,
             )
             picks.add(pick)
-        assert picks == {"track_a", "track_b"}
+        # Uniform — all 5 tracks should appear
+        assert len(picks) == 5
 
     def test_artist_penalty_reduces_weight(self, candidates, artist_map):
         """Same-artist tracks should be picked much less often."""
@@ -100,7 +108,7 @@ class TestSelectFromCandidates:
                 recent_artists=("artist_x",),
                 artist_penalty=0.01,
                 allow_same_artist=False,
-                song_k=3,
+                temperature=0.5,
                 track_artist_map=artist_map,
                 rng=r,
             )
@@ -120,7 +128,7 @@ class TestSelectFromCandidates:
                 recent_artists=("artist_x",),
                 artist_penalty=0.01,
                 allow_same_artist=True,
-                song_k=2,
+                temperature=0.5,
                 track_artist_map=artist_map,
                 rng=r,
             )
@@ -143,7 +151,7 @@ class TestSelectFromCandidates:
                 recent_artists=(),
                 artist_penalty=0.1,
                 allow_same_artist=False,
-                song_k=2,
+                temperature=0.5,
                 track_artist_map=artist_map,
                 rng=r,
             )

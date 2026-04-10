@@ -41,8 +41,8 @@ class FindNeighborsCommand(BaseModel, frozen=True):
     with the results.
     """
     target_track_id: str | None = None
-    space: str = "512d"                              # "512d" or "5d"
-    k: int = 10
+    space: str = "512d"                              # "512d" or "25d"
+    k: int = 100
     exclude_played: frozenset[str] = frozenset()
     mood_mask_active: bool = False
     recent_artists: tuple[str, ...] = ()

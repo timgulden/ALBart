@@ -1,7 +1,7 @@
 """Unified weighted track selection with artist penalty.
 
 This is the ONE place candidate selection logic lives.  Previously
-duplicated across ``_pick_normal_hop``, ``_pick_5d_neighbor``,
+duplicated across ``_pick_normal_hop``, ``_pick_25d_neighbor``,
 ``_find_nearest_512``, and ``_pick_long_hop`` in the old DJ class.
 
 All functions are pure — no I/O, no side effects.
@@ -11,6 +11,11 @@ from __future__ import annotations
 
 import numpy as np
 
+# Maximum exponent for inverse-distance weighting.
+# At temperature=0 → exponent=MAX_EXPONENT (very peaked).
+# At temperature=1 → exponent=0 (uniform).
+MAX_EXPONENT = 6.0
+
 
 def select_from_candidates(
     candidates: list[tuple[str, float]],
@@ -18,7 +23,7 @@ def select_from_candidates(
     recent_artists: tuple[str, ...],
     artist_penalty: float,
     allow_same_artist: bool,
-    song_k: int,
+    temperature: float,
     track_artist_map: dict[str, str],
     rng: np.random.Generator,
 ) -> str | None:
@@ -28,9 +33,8 @@ def select_from_candidates(
         candidates: ``[(track_id, distance), ...]`` sorted by distance.
         recent_artists: lowercased artist names from last ~3 tracks.
         artist_penalty: weight multiplier for same-artist candidates.
-            0.01 for orbit (strong penalty), 0.1 for normal play.
         allow_same_artist: if True, skip artist penalty entirely.
-        song_k: max candidates to consider (controls exploration width).
+        temperature: 0.0 (always nearest) to 1.0 (uniform random).
         track_artist_map: ``{track_id: lowercase_artist}`` for penalty lookup.
         rng: numpy random generator for weighted choice.
 
@@ -40,19 +44,20 @@ def select_from_candidates(
     if not candidates:
         return None
 
-    # Trim to song_k candidates
-    pool = candidates[:song_k]
+    if len(candidates) == 1:
+        return candidates[0][0]
 
-    # Deterministic when K=1
-    if song_k <= 1 or len(pool) == 1:
-        return pool[0][0]
+    tids = [c[0] for c in candidates]
+    dists = np.array([c[1] for c in candidates], dtype=np.float64)
 
-    tids = [c[0] for c in pool]
-    dists = np.array([c[1] for c in pool], dtype=np.float64)
+    # Inverse-distance weighting with temperature-controlled exponent.
+    # temp=0 → exponent=6 (strongly peaked), temp=1 → exponent=0 (uniform).
+    exponent = MAX_EXPONENT * (1.0 - max(0.0, min(1.0, temperature)))
 
-    # Inverse-cube-distance weighting — strongly favors nearest tracks
-    # while keeping the full pool for occasional variety
-    weights = 1.0 / np.maximum(dists, 1e-8) ** 3
+    if exponent < 1e-10:
+        weights = np.ones_like(dists)
+    else:
+        weights = 1.0 / np.maximum(dists, 1e-8) ** exponent
 
     # Artist penalty
     if not allow_same_artist:
@@ -64,7 +69,7 @@ def select_from_candidates(
 
     total = weights.sum()
     if total <= 0:
-        return pool[0][0]
+        return candidates[0][0]
     weights /= total
 
     chosen = rng.choice(len(tids), p=weights)

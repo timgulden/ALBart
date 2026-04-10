@@ -107,7 +107,7 @@ class DJState(BaseModel, frozen=True):
     """
 
     # ── Navigation parameters ────────────────────────────────────────
-    song_k: int = 10
+    temperature: float = 0.5
     hop_multiplier: float = 5.0
     hop_interval_seconds: float = 1800.0   # 30 min default
     mode: str = "exact"                    # "exact" or "roomear"

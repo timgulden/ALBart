@@ -19,13 +19,13 @@ class TestDJStateImmutability:
     def test_frozen_rejects_mutation(self):
         s = DJState()
         with pytest.raises(Exception):
-            s.song_k = 99
+            s.temperature = 99
 
     def test_model_copy_preserves_original(self):
-        s = DJState(song_k=10, total_tracks=5000)
-        s2 = s.model_copy(update={"song_k": 20})
-        assert s.song_k == 10
-        assert s2.song_k == 20
+        s = DJState(temperature=0.5, total_tracks=5000)
+        s2 = s.model_copy(update={"temperature": 0.8})
+        assert s.temperature == 0.5
+        assert s2.temperature == 0.8
 
     def test_history_is_tuple(self):
         s = DJState(history=("a", "b", "c"))
@@ -50,7 +50,7 @@ class TestDJStateImmutability:
 
     def test_defaults(self):
         s = DJState()
-        assert s.song_k == 10
+        assert s.temperature == 0.5
         assert s.hop_multiplier == 5.0
         assert s.mode == "exact"
         assert s.history == ()

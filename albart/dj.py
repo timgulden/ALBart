@@ -50,8 +50,8 @@ def main() -> None:
         help="UDP port to receive live embeddings (listen mode)",
     )
     parser.add_argument(
-        "--song-k", type=int, default=10,
-        help="Number of candidate tracks to consider (1-50, default: 10)",
+        "--temperature", type=float, default=0.5,
+        help="Next-song temperature 0.0 (nearest) to 1.0 (random), default: 0.5",
     )
     parser.add_argument(
         "--mood", type=str, default=None,
@@ -91,7 +91,7 @@ def main() -> None:
         broadcast=broadcast,
         udp_listener=udp,
         mode=args.mode,
-        song_k=max(1, min(50, args.song_k)),
+        temperature=max(0.0, min(1.0, args.temperature)),
         hop_multiplier=args.hop_multiplier,
         hop_interval_minutes=args.hop_interval,
         projector=projector,

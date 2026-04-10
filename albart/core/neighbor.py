@@ -10,6 +10,10 @@ from albart.core.commands import FindNeighborsCommand
 from albart.core.sampling import get_recent_artists
 from albart.core.state import DJState
 
+# Always fetch 100 candidates; temperature controls the selection
+# distribution over these candidates.
+NEIGHBOR_K = 100
+
 
 def build_neighbor_query(
     state: DJState,
@@ -17,7 +21,7 @@ def build_neighbor_query(
     target_track_id: str | None = None,
     use_target_embedding: str | None = None,
     space: str = "512d",
-    k: int | None = None,
+    k: int = NEIGHBOR_K,
     hop_type: str = "normal",
 ) -> FindNeighborsCommand:
     """Construct a ``FindNeighborsCommand`` from current DJ state.
@@ -25,17 +29,17 @@ def build_neighbor_query(
     Automatically populates:
     - ``exclude_played`` from ``state.played``
     - ``recent_artists`` from ``state.history``
-    - ``artist_penalty``: 0.01 for orbit modes, 0.1 for normal
+    - ``artist_penalty``: 0.1 for normal
     - ``mood_mask_active``: True when mood descriptors are set
     - ``allow_same_artist``: from orbit state
-    - ``k``: defaults to ``state.song_k``
+    - ``k``: defaults to 100 (temperature controls selection width)
 
     Args:
         state: current DJ state.
         target_track_id: track whose embedding to query around.
         use_target_embedding: engine cache key for a pre-computed target.
-        space: ``"512d"`` or ``"5d"``.
-        k: override for candidate count (defaults to ``state.song_k``).
+        space: ``"512d"`` or ``"25d"``.
+        k: candidate count (defaults to 100).
         hop_type: ``"normal"``, ``"LONG"``, ``"orbit_dwell"``,
             ``"orbit_transit"``.
     """
@@ -51,7 +55,7 @@ def build_neighbor_query(
         target_track_id=target_track_id,
         use_target_embedding=use_target_embedding,
         space=space,
-        k=k if k is not None else state.song_k,
+        k=k,
         exclude_played=state.played,
         mood_mask_active=bool(state.mood.descriptors),
         recent_artists=get_recent_artists(state.history, {}),

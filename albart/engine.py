@@ -73,7 +73,7 @@ class Engine:
         udp_listener: UDPListener,
         *,
         mode: str = "exact",
-        song_k: int = 10,
+        temperature: float = 0.5,
         hop_multiplier: float = 5.0,
         hop_interval_minutes: float = 30.0,
         projector=None,  # UmapProjector | None
@@ -88,7 +88,7 @@ class Engine:
 
         self._state = DJState(
             mode=mode,
-            song_k=song_k,
+            temperature=temperature,
             hop_multiplier=hop_multiplier,
             hop_interval_seconds=hop_interval_minutes * 60.0,
             total_tracks=db.get_total_tracks(),
@@ -189,7 +189,7 @@ class Engine:
             if target is not None:
                 exclude = state.played | anchor_ids
                 candidates = self._db.find_neighbors_25d(
-                    target, state.song_k, exclude, mood_ids,
+                    target, 100, exclude, mood_ids,
                 )
             else:
                 candidates = []
@@ -198,7 +198,7 @@ class Engine:
             target = self._db.get_embedding_25d(last_tid)
             if target is not None:
                 candidates = self._db.find_neighbors_25d(
-                    target, state.song_k, state.played,
+                    target, 100, state.played,
                     self._mood_mask,
                 )
             else:
@@ -260,7 +260,7 @@ class Engine:
             target = self._db.compute_transit_target(last_tid, anchor_tid, 0.1)
             if target is not None:
                 candidates = self._db.find_neighbors_25d(
-                    target, state.song_k, state.played,
+                    target, 100, state.played,
                     self._mood_mask,
                 )
             else:
@@ -288,7 +288,7 @@ class Engine:
             state = state.model_copy(update={"pending_hop_type": "NEW SET"})
             if target is not None:
                 candidates = self._db.find_neighbors_25d(
-                    target, state.song_k, state.played,
+                    target, 100, state.played,
                     self._mood_mask,
                 )
             else:
@@ -407,6 +407,13 @@ class Engine:
 
     def _seed(self, state: DJState, seed_track_id: Optional[str]) -> DJState:
         """Initialize the first track."""
+        if seed_track_id is None and state.orbit is not None:
+            # Orbit active — seed with the first anchor track
+            anchor_tid = state.orbit.anchors[state.orbit.current_index].track_id
+            if anchor_tid:
+                seed_track_id = anchor_tid
+                logger.info("Seeding from orbit anchor: %s", seed_track_id)
+
         if seed_track_id is None:
             # Check what Spotify is currently playing
             pb = self._playback.poll_playback()
@@ -654,7 +661,7 @@ class Engine:
 
         # Query neighbors in 25D, excluding anchors
         candidates = self._db.find_neighbors_25d(
-            target, state.song_k, exclude,
+            target, 100, exclude,
             self._mood_mask if state.mood.descriptors else None,
         )
         if not candidates:

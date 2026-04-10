@@ -35,7 +35,7 @@ interface Status {
   current_track: TrackInfo | null
   progress_ms: number
   duration_ms: number
-  song_k: number
+  temperature: number
   set_distance: number
   mode: string
   dj_active: boolean
@@ -65,7 +65,7 @@ interface SystemStatus {
 function App() {
   const [status, setStatus] = useState<Status | null>(null)
   const [mood, setMood] = useState('')
-  const [songK, setSongK] = useState(10)
+  const [temperature, setTemperature] = useState(0.5)
   const [setDist, setSetDist] = useState(5)
   const [seed, setSeed] = useState('')
   const [searchQuery, setSearchQuery] = useState('')
@@ -148,35 +148,53 @@ function App() {
   const startSession = useCallback(async () => {
     setError('')
     try {
+      // If orbit is configured, use first anchor as seed so the DJ
+      // starts in the right neighborhood instead of a random track
+      let effectiveSeed = seed || undefined
+      if (!effectiveSeed && orbitApplied && orbitDescriptions.length > 0) {
+        effectiveSeed = orbitDescriptions[0]
+      }
       await fetch(`${API}/start`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          seed: seed || undefined,
-          song_k: songK,
+          seed: effectiveSeed,
+          temperature,
           set_distance: setDist,
           mood: mood || undefined,
         }),
       })
+      // Re-apply orbit to the fresh engine
+      if (orbitApplied && orbitDescriptions.length > 0) {
+        await fetch(`${API}/orbit/apply`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ descriptions: orbitDescriptions, allow_same_artist: orbitAllowSameArtist }),
+        })
+      }
     } catch {
       setError('Could not connect to DJ server')
     }
-  }, [seed, songK, setDist, mood])
+  }, [seed, temperature, setDist, mood, orbitApplied, orbitDescriptions, orbitAllowSameArtist])
 
-  const stopSession = useCallback(async () => {
-    await fetch(`${API}/stop`, { method: 'POST' })
+  const pauseSession = useCallback(async () => {
+    await fetch(`${API}/pause`, { method: 'POST' })
+  }, [])
+
+  const resumeSession = useCallback(async () => {
+    await fetch(`${API}/resume`, { method: 'POST' })
   }, [])
 
   const skip = useCallback(async () => {
     await fetch(`${API}/skip`, { method: 'POST' })
   }, [])
 
-  const updateSongK = useCallback(async (k: number) => {
-    setSongK(k)
-    await fetch(`${API}/song_k`, {
+  const updateTemperature = useCallback(async (t: number) => {
+    setTemperature(t)
+    await fetch(`${API}/temperature`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ song_k: k }),
+      body: JSON.stringify({ temperature: t }),
     })
   }, [])
 
@@ -434,11 +452,14 @@ function App() {
                     {status.played_count} / {status.total_tracks} played
                   </span>
                   <span style={{ flex: 1 }} />
-                  {isPlaying && (
+                  {isPlaying && status?.dj_active !== false && (
                     <>
                       <button onClick={skip} style={btnStyle('#4a6cf7')}>Skip</button>
-                      <button onClick={stopSession} style={btnStyle('#e74c3c')}>Stop</button>
+                      <button onClick={pauseSession} style={btnStyle('#e74c3c')}>Pause</button>
                     </>
+                  )}
+                  {isPlaying && status?.dj_active === false && (
+                    <button onClick={resumeSession} style={btnStyle('#2ecc71')}>Resume</button>
                   )}
                 </div>
                 {isPlaying && (
@@ -771,10 +792,10 @@ function App() {
             <Label>Temperature</Label>
             <Slider
               label="Next Song"
-              value={songK} min={1} max={50} step={1}
-              leftLabel="1 (nearest only)"
-              rightLabel="50 (wide exploration)"
-              onChange={updateSongK}
+              value={temperature} min={0} max={1} step={0.05}
+              leftLabel="0.0 (nearest)"
+              rightLabel="1.0 (random)"
+              onChange={updateTemperature}
             />
             <Slider
               label="Next Set"

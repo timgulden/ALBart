@@ -4,8 +4,8 @@ Every function takes time as a parameter (no ``time.monotonic()`` calls).
 Returns new ``OrbitState`` copies — never mutates.
 
 Two phases cycle through anchor tracks:
-  DWELL  — ~30 min near the anchor in 5D UMAP space.
-  TRANSIT — ~10 steps through 512D space toward the next anchor.
+  DWELL  — ~30 min near the anchor in 25D UMAP space.
+  TRANSIT — ~10 steps through 25D UMAP space toward the next anchor.
 """
 
 from __future__ import annotations

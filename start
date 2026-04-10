@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# ALBart — launch the full DJ system (backend + frontend)
+set -e
+
+DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$DIR"
+
+# Load environment variables (.env)
+if [[ -f .env ]]; then
+    set -a
+    source .env
+    set +a
+fi
+
+cleanup() {
+    echo ""
+    echo "Shutting down ALBart..."
+    [[ -n "$DJ_PID" ]]  && kill "$DJ_PID"  2>/dev/null
+    [[ -n "$UI_PID" ]]  && kill "$UI_PID"  2>/dev/null
+    wait 2>/dev/null
+    echo "Done."
+}
+trap cleanup EXIT INT TERM
+
+# 1. Check that PostgreSQL is reachable
+if ! pg_isready -U albart -d albart -q 2>/dev/null; then
+    echo "ERROR: PostgreSQL is not running. Start it with:"
+    echo "  brew services start postgresql@16"
+    exit 1
+fi
+echo "PostgreSQL is running."
+
+# 2. Start DJ server (backend API on port 8765)
+echo "Starting DJ server..."
+python3 -m albart.dj_server &
+DJ_PID=$!
+
+# 3. Start React UI (frontend dev server)
+echo "Starting React UI..."
+cd ui
+npm run dev &
+UI_PID=$!
+cd "$DIR"
+
+echo ""
+echo "=== ALBart is running ==="
+echo "  Backend API:  http://127.0.0.1:8765"
+echo "  Frontend UI:  http://localhost:5173"
+echo ""
+echo "Press Ctrl+C to stop everything."
+echo ""
+
+# Keep running until Ctrl+C
+wait

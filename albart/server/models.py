@@ -11,15 +11,15 @@ from pydantic import BaseModel
 
 class StartRequest(BaseModel):
     seed: Optional[str] = None
-    song_k: int = 10
+    temperature: float = 0.5
     set_distance: float = 5.0
     mood: Optional[str] = None
     hop_interval: float = 30.0
     mode: str = "exact"
 
 
-class SongKUpdate(BaseModel):
-    song_k: int
+class TemperatureUpdate(BaseModel):
+    temperature: float
 
 
 class SetDistanceUpdate(BaseModel):
@@ -98,7 +98,7 @@ class StatusResponse(BaseModel):
     current_track: Optional[TrackInfo] = None
     progress_ms: int = 0
     duration_ms: int = 0
-    song_k: int
+    temperature: float
     set_distance: float
     mode: str = "exact"
     dj_active: bool = True

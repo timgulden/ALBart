@@ -59,17 +59,16 @@ The SQLite database (`data/db.sqlite`) still exists for backward compatibility w
 
 ### Embedding Space Usage
 
-Two embedding spaces serve different purposes:
-- **512D CLAP**: captures audio texture (timbre, energy, production). Used for **transit** between genre clusters and for normal DJ hops.
-- **5D UMAP**: captures genre structure (which tracks cluster together). Used for **dwell** at orbit anchors (staying within a genre).
-
-This split was empirically validated — 512D dwell drifts across genres (CLAP groups by audio texture, not genre), while 5D dwell stays coherent.
+Three embedding representations exist, with two actively used for navigation:
+- **512D CLAP**: captures audio texture (timbre, energy, production). Used for normal DJ hops.
+- **25D UMAP**: parametric projection of 512D CLAP. Primary navigation space for both orbit dwell and transit. Trained via `tools/build_umap_25d_parametric.py`; new tracks are projected on ingest.
+- **5D UMAP** (legacy): kept in the database for map display compatibility, but no longer used for navigation.
 
 ### Orbit Navigation
 
 The orbit is a two-phase state machine cycling through anchor tracks:
-- **Dwell phase**: play music near the current anchor using 5D neighbor hops.
-- **Transit phase**: step through 512D space toward the next anchor.
+- **Dwell phase**: play music near the current anchor using 25D neighbor hops.
+- **Transit phase**: step through 25D space toward the next anchor.
 
 Anchor tracks are chosen by Claude from the full library. The orbit state machine is pure (`core/orbit_logic.py`) — all time-dependent decisions take `current_time` as a parameter.
 

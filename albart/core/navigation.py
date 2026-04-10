@@ -97,6 +97,10 @@ def on_poll_tick(
     last_tid = state.history[-1]
     commands.append(BroadcastToMapCommand(track_id=last_tid))
 
+    # ── Paused / Spotify Control mode: don't pick or auto-resume ───
+    if not state.dj_active:
+        return LogicResult(state=state, commands=commands)
+
     # ── Check: Spotify paused or stopped → try to resume ─────────────
     current = playback.current_track_id
     if current is None:
@@ -125,10 +129,6 @@ def on_poll_tick(
             commands=[BroadcastToMapCommand(track_id=current)],
             log_message=f"Manual change: {current}",
         )
-
-    # ── Spotify Control mode: just follow, don't pick ──────────────
-    if not state.dj_active:
-        return LogicResult(state=state, commands=commands)
 
     # ── Pending pick: play when song ends ────────────────────────────
     remaining = _remaining_ms(playback, now)
@@ -320,7 +320,7 @@ def on_neighbors_found(
         recent_artists=recent,
         artist_penalty=penalty,
         allow_same_artist=allow_same,
-        song_k=state.song_k,
+        temperature=state.temperature,
         track_artist_map=track_artists,
         rng=rng,
     )
